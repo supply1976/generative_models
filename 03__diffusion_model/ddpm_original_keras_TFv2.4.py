@@ -11,17 +11,17 @@ import tensorflow_datasets as tfds
 
 
 batch_size = 50
-num_epochs = 20  # Just for the sake of demonstration
+num_epochs = 5  # Just for the sake of demonstration
 total_timesteps = 1000
 norm_groups = 8  # Number of groups used in GroupNormalization layer
 learning_rate = 2e-4
 
-img_size = 128
+img_size = 64
 img_channels = 3
 clip_min = -1.0
 clip_max = 1.0
 
-first_conv_channels = 2
+first_conv_channels = 64
 channel_multiplier = [1, 2, 4, 8]
 widths = [first_conv_channels * mult for mult in channel_multiplier]
 has_attention = [False, False, False, False] #[False, False, True, True]
@@ -289,7 +289,7 @@ class TimeEmbedding(keras.layers.Layer):
         return emb
 
 
-def ResidualBlock(width, groups=8, activation_fn=keras.activations.relu):
+def ResidualBlock(width, groups=8, activation_fn=keras.activations.swish):
     def apply(inputs):
         x, t = inputs
         input_width = x.shape[3]
@@ -302,7 +302,8 @@ def ResidualBlock(width, groups=8, activation_fn=keras.activations.relu):
 
         temb = activation_fn(t)
         temb = keras.layers.Dense(width, kernel_initializer=kernel_init(1.0))(temb)[:, None, None, :]
-
+        
+        # TF v2.4 has no layers.GroupNormalization()
         #x = keras.layers.GroupNormalization(groups=groups)(x)
         x = activation_fn(x)
         x = keras.layers.Conv2D(
@@ -339,7 +340,7 @@ def UpSample(width, interpolation="nearest"):
     return apply
 
 
-def TimeMLP(units, activation_fn=keras.activations.relu):
+def TimeMLP(units, activation_fn=keras.activations.swish):
     def apply(inputs):
         temb = keras.layers.Dense(
             units, activation=activation_fn, kernel_initializer=kernel_init(1.0))(inputs)
@@ -356,7 +357,7 @@ def build_model(
     num_res_blocks=2,
     norm_groups=8,
     interpolation="nearest",
-    activation_fn=keras.activations.relu):
+    activation_fn=keras.activations.swish):
     image_input = layers.Input(shape=(img_size, img_size, img_channels), name="image_input")
     time_input = keras.Input(shape=(), dtype=tf.int64, name="time_input")
 
@@ -450,9 +451,16 @@ class DiffusionModel(keras.Model):
         return {"loss": loss}
 
     def generate_images(self, num_images=16):
+        #input_images, _ = self.network.inputs
+        #_, img_size, _, img_channels = input_images.shape
+        
         # 1. Randomly sample noise (starting point for reverse process)
-        samples = tf.random.normal(
-            shape=(num_images, img_size, img_size, img_channels), dtype=tf.float32)
+        z_random = tf.random.normal(
+            shape=(num_images//2, img_size, img_size, img_channels), dtype=tf.float32)
+        z_zero = tf.zeros(
+            shape=(num_images//2, img_size, img_size, img_channels), dtype=tf.float32)
+        samples = tf.concat([z_zero, z_random], axis=0)
+
         # 2. Sample from the model iteratively
         for t in reversed(range(0, self.timesteps)):
             tt = tf.cast(tf.fill(num_images, t), dtype=tf.int64)
@@ -479,6 +487,17 @@ class DiffusionModel(keras.Model):
         plt.tight_layout()
 
 
+gpus = tf.config.list_physical_devices("GPU")
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        logical_gpus = tf.config.list_logical_devices('GPU')
+        print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
+    except RuntimeError as e:
+        print(e)
+
+
 # Build the unet model
 network = build_model(
     img_size=img_size,
@@ -487,7 +506,7 @@ network = build_model(
     has_attention=has_attention,
     num_res_blocks=num_res_blocks,
     norm_groups=norm_groups,
-    activation_fn=keras.activations.relu)
+    activation_fn=keras.activations.swish)
 
 ema_network = build_model(
     img_size=img_size,
@@ -496,7 +515,7 @@ ema_network = build_model(
     has_attention=has_attention,
     num_res_blocks=num_res_blocks,
     norm_groups=norm_groups,
-    activation_fn=keras.activations.relu)
+    activation_fn=keras.activations.swish)
 
 ema_network.set_weights(network.get_weights())  # Initially the weights are the same
 
@@ -511,18 +530,20 @@ model = DiffusionModel(
     gdf_util=gdf_util,
     timesteps=total_timesteps)
 
-# restore model weights
-if 0:
-    fd = open('./best/checkpoint', 'r')
-    model_path = fd.readline()
-    model_path = model_path.replace('"', '').strip().split(": ")[1]
-    model.load_weights(os.path.join('./best', model_path))
-    #load_status = model.load_weights('./best/best_model')
-    #model.ema_network.set_weights(network.get_weights())
-    #load_status.assert_consumed()
-    #model.plot_images()
 
+# restore model weights
 if 1:
+    #fd = open('./best/checkpoint', 'r')
+    #model_path = fd.readline()
+    #model_path = model_path.replace('"', '').strip().split(": ")[1]
+    #model.load_weights(os.path.join('./best', model_path))
+    load_status = ema_network.load_weights('./outputs_TFv2.4/ema_last_epoch')
+    load_status.assert_consumed()
+    model.network.set_weights(ema_network.get_weights())
+    model.ema_network.set_weights(ema_network.get_weights())
+    model.plot_images()
+
+if 0:
     # Compile the model
     model.compile(
         loss=keras.losses.MeanSquaredError(),
@@ -530,19 +551,11 @@ if 1:
     
     # Load the dataset, available after TF v2.4
     ds = tfds.load(dataset_name, split="train", with_info=False, shuffle_files=True)
-    #ds = ds.take(2000)
     train_ds = (
         ds.map(train_preprocessing, num_parallel_calls=tf.data.AUTOTUNE)
         .batch(batch_size, drop_remainder=True)
         .shuffle(batch_size * 2)
         .prefetch(tf.data.AUTOTUNE))
-
-    #data = np.load("/home/taco/image_mad_sci_1000x1000.npy")
-    #data = [data, np.fliplr(data), np.flipud(data), np.rot90(data)]
-    #train_images = np.stack(data)
-    #(train_images, _), _ = keras.datasets.cifar10.load_data()
-    #train_images = train_images.astype(np.float32)/127.5 -1
-    #train_images = tf.image.resize(train_images, size=(img_size, img_size), antialias=True)
 
     # Train the model
     model.fit(
@@ -552,13 +565,13 @@ if 1:
         callbacks=[
             keras.callbacks.LambdaCallback(on_train_end=model.plot_images),
             keras.callbacks.ModelCheckpoint(
-                filepath=os.path.join('./best', 'ckpt_epoch-{epoch:02d}_loss-{loss:04f}'),
+                filepath=os.path.join('./outputs_TFv2.4', 'model_best'),
                 save_weights_only=True,
                 monitor='loss',
                 mode='min',
                 save_best_only=True,
                 initial_value_threshold=0.05)])
 
-#ema_network.save_weights("./best/ckpt")
+ema_network.save_weights("./outputs_TFv2.4/ema_last_epoch")
 
 plt.show()
