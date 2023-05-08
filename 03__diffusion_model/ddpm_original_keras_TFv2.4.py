@@ -3,15 +3,25 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Requires TensorFlow >=2.11 for the GroupNormalization layer.
 import tensorflow as tf
+
+# TF v2.4 has no GroupNormalization layer, 
+# so need to import tensorflow_addons
+# use pip install tensorflow_addons==0.14 for TF v2.4  
+##########################################
+# version matrix:
+#   TF      vs     TF addons
+#   2.4            0.14
+##########################################
+import tensorflow_addons as tfa
+
 from tensorflow import keras
 from tensorflow.keras import layers
 import tensorflow_datasets as tfds
 
 
-batch_size = 50
-num_epochs = 5  # Just for the sake of demonstration
+batch_size = 32
+num_epochs = 20
 total_timesteps = 1000
 norm_groups = 8  # Number of groups used in GroupNormalization layer
 learning_rate = 2e-4
@@ -24,10 +34,11 @@ clip_max = 1.0
 first_conv_channels = 64
 channel_multiplier = [1, 2, 4, 8]
 widths = [first_conv_channels * mult for mult in channel_multiplier]
-has_attention = [False, False, False, False] #[False, False, True, True]
+has_attention = [False, False, True, True]
 num_res_blocks = 2  # Number of residual blocks
 
 dataset_name = "cifar10"
+#dataset_name = "oxford_flowers102"
 
 
 def augment(img):
@@ -245,8 +256,7 @@ class AttentionBlock(keras.layers.Layer):
         self.groups = groups
         super().__init__(**kwargs)
 
-        #self.norm = keras.layers.GroupNormalization(groups=groups)
-        self.norm = keras.layers.BatchNormalization()
+        self.norm = tfa.layers.GroupNormalization(groups=groups)
         self.query = keras.layers.Dense(units, kernel_initializer=kernel_init(1.0))
         self.key = keras.layers.Dense(units, kernel_initializer=kernel_init(1.0))
         self.value = keras.layers.Dense(units, kernel_initializer=kernel_init(1.0))
@@ -303,13 +313,12 @@ def ResidualBlock(width, groups=8, activation_fn=keras.activations.swish):
         temb = activation_fn(t)
         temb = keras.layers.Dense(width, kernel_initializer=kernel_init(1.0))(temb)[:, None, None, :]
         
-        # TF v2.4 has no layers.GroupNormalization()
-        #x = keras.layers.GroupNormalization(groups=groups)(x)
+        x = tfa.layers.GroupNormalization(groups=groups)(x)
         x = activation_fn(x)
         x = keras.layers.Conv2D(
             width, kernel_size=3, padding="same", kernel_initializer=kernel_init(1.0))(x)
         x = keras.layers.Add()([x, temb])
-        #x = kereas.layers.GroupNormalization(groups=groups)(x)
+        x = tfa.layers.GroupNormalization(groups=groups)(x)
         x = activation_fn(x)
 
         x = keras.layers.Conv2D(
@@ -387,7 +396,7 @@ def build_model(
 
     # MiddleBlock
     x = ResidualBlock(widths[-1], groups=norm_groups, activation_fn=activation_fn)([x, temb])
-    #x = AttentionBlock(widths[-1], groups=norm_groups)(x)
+    x = AttentionBlock(widths[-1], groups=norm_groups)(x)
     x = ResidualBlock(widths[-1], groups=norm_groups, activation_fn=activation_fn)([x, temb])
 
     # UpBlock
@@ -401,7 +410,7 @@ def build_model(
             x = UpSample(widths[i], interpolation=interpolation)(x)
 
     # End block
-    #x = keras.layers.GroupNormalization(groups=norm_groups)(x)
+    x = tfa.layers.GroupNormalization(groups=norm_groups)(x)
     x = activation_fn(x)
     x = keras.layers.Conv2D(3, (3, 3), padding="same", kernel_initializer=kernel_init(0.0))(x)
     return keras.Model([image_input, time_input], x, name="unet")
@@ -532,18 +541,14 @@ model = DiffusionModel(
 
 
 # restore model weights
-if 1:
-    #fd = open('./best/checkpoint', 'r')
-    #model_path = fd.readline()
-    #model_path = model_path.replace('"', '').strip().split(": ")[1]
-    #model.load_weights(os.path.join('./best', model_path))
+if 0:
     load_status = ema_network.load_weights('./outputs_TFv2.4/ema_last_epoch')
     load_status.assert_consumed()
     model.network.set_weights(ema_network.get_weights())
     model.ema_network.set_weights(ema_network.get_weights())
     model.plot_images()
 
-if 0:
+if 1:
     # Compile the model
     model.compile(
         loss=keras.losses.MeanSquaredError(),
@@ -563,14 +568,7 @@ if 0:
         epochs=num_epochs,
         batch_size=batch_size,
         callbacks=[
-            keras.callbacks.LambdaCallback(on_train_end=model.plot_images),
-            keras.callbacks.ModelCheckpoint(
-                filepath=os.path.join('./outputs_TFv2.4', 'model_best'),
-                save_weights_only=True,
-                monitor='loss',
-                mode='min',
-                save_best_only=True,
-                initial_value_threshold=0.05)])
+            keras.callbacks.LambdaCallback(on_train_end=model.plot_images)])
 
 ema_network.save_weights("./outputs_TFv2.4/ema_last_epoch")
 
