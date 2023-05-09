@@ -3,7 +3,7 @@ import tensorflow as tf
 from tensorflow import keras
 import pandas as pd
 import matplotlib as mpl
-mpl.rcParams['backend']='TkAgg'
+#mpl.rcParams['backend']='TkAgg'
 import matplotlib.pyplot as plt
 import scipy as sp
 from scipy.optimize import curve_fit
@@ -44,12 +44,16 @@ class GaussianDiffusion:
     back_mean_xtn1_xt_x0 = x0 * self.back_mean_coef1[t] + xt_sample * self.back_mean_coef2[t]
     return (xt_sample, back_mean_xtn1_xt_x0, noise_t)
 
-  def reverse_diffuse_sim(self, xt, pred_x0, t):
-    #pred_x0 = (xT - pred_noise * np.sqrt(1-self.alpha_bar[t])) / np.sqrt(self.alpha_bar[t])
-    model_mean_t = pred_x0 * self.back_mean_coef1[t] + xt * self.back_mean_coef2[t]
+  def reverse_diffuse_sim(self, xt, t, pred_noise=None):
+    if pred_noise is not None:
+      x0_recon = (xt - pred_noise * np.sqrt(1-self.alpha_bar[t])) / np.sqrt(self.alpha_bar[t])
+    else:
+      x0_recon = self.x0
+    model_mean_t = x0_recon * self.back_mean_coef1[t] + xt * self.back_mean_coef2[t]
     model_var_t = self.back_var[t]
     xt = model_mean_t + np.random.randn(*xt.shape) * np.sqrt(model_var_t)
     return xt
+
 
 def myfunc(x):
   #val = a + b*x + c/(1+np.exp(-d*(x-e)))
@@ -57,11 +61,13 @@ def myfunc(x):
   val = 4*np.tanh(x-0.3)
   return val
 
+
 def rescale_clip_for_plot(images):
   images = images - images.min()
   images = images / images.max()
   print(images.max(), images.min())
   return images
+
 
 #data = np.load("/home/taco/image_mad_sci_1000x1000.npy")
 #data = [data, np.fliplr(data), np.flipud(data), np.rot90(data)]
@@ -70,9 +76,11 @@ def rescale_clip_for_plot(images):
 #train_images = train_images[:, 0:250, 550:800, :]
 #print(train_images.shape)
 
-data = tf.keras.datasets.fashion_mnist.load_data()
+
+#data = tf.keras.datasets.fashion_mnist.load_data()
 data = tf.keras.datasets.cifar10.load_data()
 (train_images, train_labels), (test_images, test_label) = data
+
 # normalize images to (-1,1)
 train_images = train_images.astype(np.float32)/127.5 - 1
 train_images = np.clip(train_images, -1.0, 1.0)
@@ -86,10 +94,9 @@ x10, _, _ = gd.forward_diffuse_sim(x0, 10)
 x100, _, _ = gd.forward_diffuse_sim(x0, 100)
 
 
-zT = np.random.randn(*x0.shape)
+samples = np.random.randn(*x0.shape)
 for t in reversed(range(0,1000)):
-  x0_reverse = gd.reverse_diffuse_sim(zT, zT, t)
-  zT = x0_reverse
+  samples = gd.reverse_diffuse_sim(xt=samples, t=t, pred_noise=None)
 
 #df.plot(x='t_index', y='rev_xt', style='-.', ax=ax2, grid=True)
 #df.plot(x='t_index', y='model_mean_t', style='-', ax=ax3, grid=True)
@@ -109,7 +116,7 @@ x0 = rescale_clip_for_plot(x0)
 x1 = rescale_clip_for_plot(x1)
 x10 = rescale_clip_for_plot(x10)
 x100 = rescale_clip_for_plot(x100)
-x0_reverse = rescale_clip_for_plot(x0_reverse)
+x0_reverse = rescale_clip_for_plot(samples)
 
 fig, axes = plt.subplots(nrows=5, ncols=6, figsize=(10,6))
 for i in range(6):
