@@ -20,40 +20,38 @@ def augment(img):
     return tf.image.random_flip_left_right(img)
 
 
-def resize_and_rescale(img, size):
+def resize_and_rescale(img, img_size):
     """Resize the image to the desired size first and then
-    rescale the pixel values in the range [-1.0, 1.0].
+    rescale the pixel values in the range [CLIP_MIN, CLIP_MAX].
 
     Args:
-        img: Image tensor
-        size: Desired image size for resizing
+        img: Image 3D tensor [height, width, channels]
+        img_size: int, Desired image size for resizing
     Returns:
         Resized and rescaled image tensor
     """
 
-    height = tf.shape(img)[0]
-    width = tf.shape(img)[1]
-    crop_size = tf.minimum(height, width)
-
+    height, width, _ = img.shape.as_list()
+    crop_size = min(height, width)
     img = tf.image.crop_to_bounding_box(img, 
-        (height - crop_size)// 2,
+        (height - crop_size)// 2, 
         (width - crop_size) // 2,
         crop_size, 
         crop_size)
-
     # Resize
     img = tf.cast(img, dtype=tf.float32)
-    img = tf.image.resize(img, size=size, antialias=True)
+    if img_size != crop_size:
+        img = tf.image.resize(img, size=(img_size, img_size), antialias=True)
 
     # Rescale the pixel values
-    img = img / 127.5 - 1.0
+    img = (img/255.0) *(CLIP_MAX-CLIP_MIN) + CLIP_MIN
     img = tf.clip_by_value(img, CLIP_MIN, CLIP_MAX)
     return img
 
 
-def train_preprocessing(x, size):
+def train_preprocessing(x, img_size):
     img = x["image"]
-    img = resize_and_rescale(img, size=size)
+    img = resize_and_rescale(img, img_size)
     img = augment(img)
     return img
 
@@ -292,7 +290,6 @@ def ResidualBlock(width, groups=8, activation_fn=keras.activations.swish):
         x = keras.layers.Add()([x, temb])
         x = tfa.layers.GroupNormalization(groups=groups)(x)
         x = activation_fn(x)
-
         x = keras.layers.Conv2D(
             width, kernel_size=3, padding="same", kernel_initializer=kernel_init(0.0))(x)
         x = keras.layers.Add()([x, residual])
@@ -303,11 +300,7 @@ def ResidualBlock(width, groups=8, activation_fn=keras.activations.swish):
 def DownSample(width):
     def apply(x):
         x = keras.layers.Conv2D(
-            width,
-            kernel_size=3,
-            strides=2,
-            padding="same",
-            kernel_initializer=kernel_init(1.0))(x)
+            width, kernel_size=3, strides=2, padding="same", kernel_initializer=kernel_init(1.0))(x)
         return x
     return apply
 
@@ -336,6 +329,7 @@ def build_model(
     first_conv_channels,
     widths,
     has_attention,
+    #attn_resolutions=(16,),
     num_res_blocks=2,
     norm_groups=8,
     interpolation="nearest",
@@ -359,11 +353,12 @@ def build_model(
         for _ in range(num_res_blocks):
             x = ResidualBlock(
                 widths[i], groups=norm_groups, activation_fn=activation_fn)([x, temb])
+            #if x.shape[1] in attn_resolutions:
             if has_attention[i]:
                 x = AttentionBlock(widths[i], groups=norm_groups)(x)
             skips.append(x)
 
-        if widths[i] != widths[-1]:
+        if i != len(widths)-1:
             x = DownSample(widths[i])(x)
             skips.append(x)
 
@@ -377,6 +372,7 @@ def build_model(
         for _ in range(num_res_blocks + 1):
             x = keras.layers.Concatenate(axis=-1)([x, skips.pop()])
             x = ResidualBlock(widths[i], groups=norm_groups, activation_fn=activation_fn)([x, temb])
+            #if x.shape[1] in attn_resolutions:
             if has_attention[i]:
                 x = AttentionBlock(widths[i], groups=norm_groups)(x)
         if i != 0:
@@ -465,7 +461,6 @@ class DiffusionModel(keras.Model):
             else:
                 ax[i // num_cols, i % num_cols].imshow(image)
                 ax[i // num_cols, i % num_cols].axis("off")
-
         plt.tight_layout()
 
 
@@ -475,6 +470,7 @@ def main():
     parser.add_argument('--restore_model', action='store_true')
     parser.add_argument('--inference', action='store_true')
     parser.add_argument('--training', action='store_true')
+    parser.add_argument('--dataset_check', action='store_true')
 
     parser.add_argument('--num_epochs', type=int, default=2)
     parser.add_argument('--batch_size', type=int, default=32)
@@ -498,12 +494,19 @@ def main():
     dataset_name = FLAGS.ds_name
 
     first_conv_channels = 64
-    channel_multiplier = [1, 2, 4, 8]
+    channel_multiplier = [1, 2, 2, 2]
     widths = [first_conv_channels * mult for mult in channel_multiplier]
     has_attention = [False, False, True, True]
+    assert len(channel_multiplier)==len(has_attention)
     num_res_blocks = 2  # Number of residual blocks
-    size_tr = (img_size, img_size)
 
+    model_name = ".".join([
+        dataset_name, 
+        str(img_size), 
+        str(first_conv_channels), 
+        "".join(list(map(str, channel_multiplier)))
+        ])
+    
     gpus = tf.config.list_physical_devices("GPU")
     if gpus:
         try:
@@ -519,6 +522,7 @@ def main():
     network = build_model(img_size=img_size, img_channels=img_channels,
         first_conv_channels=first_conv_channels,
         widths=widths,
+        #attn_resolutions=(16,),
         has_attention=has_attention,
         num_res_blocks=num_res_blocks,
         norm_groups=norm_groups,
@@ -527,6 +531,7 @@ def main():
     ema_network = build_model(img_size=img_size, img_channels=img_channels,
         first_conv_channels=first_conv_channels,
         widths=widths,
+        #attn_resolutions=(16,),
         has_attention=has_attention,
         num_res_blocks=num_res_blocks,
         norm_groups=norm_groups,
@@ -553,7 +558,9 @@ def main():
         load_status.assert_consumed()
 
     # Get the model
-    model = DiffusionModel(network=network, ema_network=ema_network,
+    model = DiffusionModel(
+        network=network, 
+        ema_network=ema_network,
         gdf_util=gdf_util,
         timesteps=total_timesteps)
     
@@ -569,13 +576,13 @@ def main():
             optimizer=keras.optimizers.Adam(learning_rate=learning_rate))
     
         train_ds = (
-            ds.map(lambda x: train_preprocessing(x, size=size_tr), num_parallel_calls=tf.data.AUTOTUNE)
+            ds.map(lambda x: train_preprocessing(x, img_size), num_parallel_calls=tf.data.AUTOTUNE)
             .batch(batch_size, drop_remainder=True)
             .shuffle(batch_size * 2)
             .prefetch(tf.data.AUTOTUNE))
 
         # Train the model
-        savedir = FLAGS.ds_name + '_img_size_'+str(img_size)
+        savedir = model_name
         if not os.path.isdir(savedir):
             os.mkdir(savedir)
 
@@ -585,6 +592,19 @@ def main():
             batch_size=batch_size,
             callbacks=[keras.callbacks.LambdaCallback(on_train_end=model.plot_images)])
         ema_network.save_weights(os.path.join(savedir, "ema_best"))
+
+    elif FLAGS.dataset_check:
+        ds_check = ds.take(16)
+        ds_check = ds_check.map(lambda x: train_preprocessing(x, img_size))
+        img_check = np.stack([x.numpy() for x in ds_check], axis=0)
+        img_check = (img_check + 1.0) / 2.0
+        fig, axes = plt.subplots(nrows=2, ncols=8, figsize=(10,4))
+        axes = axes.flatten()
+        for i in range(16):
+            axes[i].imshow(img_check[i])
+            axes[i].axis('off')
+        print(img_check.shape, img_check.dtype, img_check.min(), img_check.max())
+        plt.tight_layout()
 
     else:
         print("no action")
