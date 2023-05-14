@@ -30,19 +30,18 @@ def resize_and_rescale(img, img_size):
     Returns:
         Resized and rescaled image tensor
     """
-
-    height, width, _ = img.shape.as_list()
-    crop_size = min(height, width)
-    img = tf.image.crop_to_bounding_box(img, 
+    height = tf.shape(img)[0]
+    width = tf.shape(img)[1]
+    crop_size = tf.minimum(height, width)
+    img = tf.image.crop_to_bounding_box(
+        img, 
         (height - crop_size)// 2, 
         (width - crop_size) // 2,
         crop_size, 
         crop_size)
     # Resize
     img = tf.cast(img, dtype=tf.float32)
-    if img_size != crop_size:
-        img = tf.image.resize(img, size=(img_size, img_size), antialias=True)
-
+    img = tf.image.resize(img, size=(img_size, img_size), antialias=True)
     # Rescale the pixel values
     img = (img/255.0) *(CLIP_MAX-CLIP_MIN) + CLIP_MIN
     img = tf.clip_by_value(img, CLIP_MIN, CLIP_MAX)
@@ -481,6 +480,9 @@ def main():
     parser.add_argument('--img_channels', type=int, default=3)
     #parser.add_argument('--ds_name', type=str, default="oxford_flowers102")
     parser.add_argument('--ds_name', type=str, default="cifar10")
+    parser.add_argument('--first_ch', type=int, default=8)
+    parser.add_argument('--ch_mult', nargs='+', type=int, default=[1, 2, 4, 8])
+
 
     FLAGS, _ = parser.parse_known_args()
     
@@ -493,8 +495,8 @@ def main():
     img_channels = FLAGS.img_channels
     dataset_name = FLAGS.ds_name
 
-    first_conv_channels = 64
-    channel_multiplier = [1, 2, 2, 2]
+    first_conv_channels = FLAGS.first_ch
+    channel_multiplier = FLAGS.ch_mult
     widths = [first_conv_channels * mult for mult in channel_multiplier]
     has_attention = [False, False, True, True]
     assert len(channel_multiplier)==len(has_attention)
