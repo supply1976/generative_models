@@ -51,7 +51,7 @@ def resize_and_rescale(img, img_size):
 def train_preprocessing(x, img_size):
     img = x["image"]
     img = resize_and_rescale(img, img_size)
-    img = augment(img)
+    #img = augment(img)
     return img
 
 
@@ -476,13 +476,12 @@ def main():
     parser.add_argument('--total_timesteps', type=int, default=1000)
     parser.add_argument('--norm_groups', type=int, default=8)
     parser.add_argument('--learning_rate', type=float, default=0.0002)
-    parser.add_argument('--img_size', type=int, default=64)
+    parser.add_argument('--img_size', type=int, default=32)
     parser.add_argument('--img_channels', type=int, default=3)
-    #parser.add_argument('--ds_name', type=str, default="oxford_flowers102")
-    parser.add_argument('--ds_name', type=str, default="cifar10")
+    parser.add_argument('--ds_name', type=str, default=None, 
+      help='available: "oxford_flowers102", "custom"')
     parser.add_argument('--first_ch', type=int, default=8)
     parser.add_argument('--ch_mult', nargs='+', type=int, default=[1, 2, 4, 8])
-
 
     FLAGS, _ = parser.parse_known_args()
     
@@ -494,6 +493,9 @@ def main():
     img_size = FLAGS.img_size
     img_channels = FLAGS.img_channels
     dataset_name = FLAGS.ds_name
+    if dataset_name is None:
+      print("no dataset")
+      return 0
 
     first_conv_channels = FLAGS.first_ch
     channel_multiplier = FLAGS.ch_mult
@@ -546,7 +548,16 @@ def main():
     gdf_util = GaussianDiffusion(timesteps=total_timesteps)
 
     # Load the dataset, tensorflow_datasets available after TF v2.4
-    ds = tfds.load(dataset_name, split="train", with_info=False, shuffle_files=False)
+    ds = None
+    if dataset_name == "custom":
+      ds = np.load("./random_patterns.npy")
+      ds = ds * 255
+      ds = np.expand_dims(ds, axis=-1)
+      print(ds.shape, ds.dtype, ds.max(), ds.min())
+      ds = tf.data.Dataset.from_tensor_slices({"image": ds})
+
+    else:
+      ds = tfds.load(dataset_name, split="train", with_info=False, shuffle_files=False)
     
     # restore the trained model weights
     if FLAGS.restore_model and FLAGS.model_dir is not None:
