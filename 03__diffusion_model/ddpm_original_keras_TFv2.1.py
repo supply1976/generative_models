@@ -9,10 +9,10 @@ from tensorflow import keras
 from tensorflow.keras import layers
 #import tensorflow_datasets as tfds
 
-#tf.compat.v1.disable_eager_execution()
+tf.compat.v1.disable_eager_execution()
 
 batch_size = 50
-num_epochs = 10  # Just for the sake of demonstration
+num_epochs = 5  # Just for the sake of demonstration
 total_timesteps = 1000
 norm_groups = 8  # Number of groups used in GroupNormalization layer
 learning_rate = 2e-4
@@ -540,10 +540,11 @@ gdf_util = GaussianDiffusion(timesteps=total_timesteps)
 
 (train_images, _), _ = keras.datasets.cifar10.load_data()
 train_images = train_images.astype(np.float32)/127.5 -1
-train_images = tf.image.resize(train_images, size=(img_size, img_size), antialias=True)
+ds = tf.data.Dataset.from_tensor_slices(train_images)
+ds_train = ds.map(lambda x: tf.image.resize(x, size=(img_size, img_size), antialias=True)).batch(50)
 
 # restore model
-if 1:
+if 0:
   load_status = network.load_weights("./best/ckpt")
   ema_network.set_weights(network.get_weights())
   load_status.assert_consumed()
@@ -565,12 +566,12 @@ model.compile(
 
 # Train the model
 model.fit(
-    x=train_images,
+    x=ds_train,
     y=None,
     epochs=num_epochs,
-    batch_size=batch_size,
+    #batch_size=batch_size,
     #steps_per_epoch=train_images.shape[0]//batch_size,
-    callbacks=[keras.callbacks.LambdaCallback(
+        callbacks=[keras.callbacks.LambdaCallback(
         #on_batch_end=model.update_ema_weights,
         #on_epoch_end=lambda epoch,logs: json_log.write(json.dumps({'epoch': epoch, 'loss': logs['loss']}) + '\n'),
         on_train_end=model.plot_images)],
