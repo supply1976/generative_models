@@ -32,6 +32,7 @@ class GausDiffUtil:
       betas = np.linspace(beta_start, beta_end, timesteps, dtype=np.float64)
       print("use linear beta schedule, beta = ({},{})".format(beta_start, beta_end))
     elif beta_schedule=='cosine':
+      print("use cosine beta schedule, beta = ({},{})".format(beta_start, beta_end))
       betas = beta_start + beta_end*(1-np.cos(0.5*np.pi*np.arange(1,timesteps+1)/timesteps))
     else:
       betas=None

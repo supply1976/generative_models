@@ -1,5 +1,4 @@
 import os, sys, argparse
-os.environ['CUDA_VISIBLE_DEVICES']='3'
 import math, time, datetime
 import numpy as np
 import tensorflow as tf
@@ -21,6 +20,7 @@ def main():
   parser = argparse.ArgumentParser()
   parser.add_argument('--training',      action='store_true')
   parser.add_argument('--gen_images',    action='store_true')
+  parser.add_argument('--num_gen_images',type=int, default=100)
   parser.add_argument('--restore_model', type=str, default=None)
   parser.add_argument('--dataset_path',  type=str, default=None,
     help=" data dir with .npz files")
@@ -145,15 +145,18 @@ def main():
     train_ds = train_ds.cache()
     train_ds = train_ds.shuffle(train_ds.cardinality())
 
-  elif FLAGS.dataset_name == "VIA990":
+  else:
     if FLAGS.dataset_path is None:
-      print("no training dataset is provided, quit")
+      print("please provide dataset_path, Exit")
       return
     else:
+      print("user defined dataset name:{}".format(FLAGS.dataset_name))
       if os.path.isdir(FLAGS.dataset_path):
+        # a folder contains multiple npz files
         dataloader = DataLoader(data_dir=FLAGS.dataset_path, crop_size=None)
         train_ds = dataloader.load_dataset()
       elif os.path.isfile(FLAGS.dataset_path):
+        # single (big) npz file
         data = np.load(FLAGS.dataset_path)
         train_images = data['images']
         train_ds = tf.data.Dataset.from_tensor_slices(train_images)
@@ -161,10 +164,6 @@ def main():
         train_ds = train_ds.shuffle(train_ds.cardinality())
       else:
         return
-  else:
-    # no training dataset, 
-    print("not support yet, do nothing")
-    return 
 
   if FLAGS.training and train_ds is not None:
     #train_ds = train_ds.map(_special_data_prep, num_parallel_calls=tf.data.AUTOTUNE)
@@ -212,13 +211,14 @@ def main():
 
     if FLAGS.given_samples is None:
       # use gaussian random noise to generate images
-      ddpm.generate_images(num_images=50, savedir=gen_dir, export_intermediate=True)
+      ddpm.generate_images(
+        num_images=FLAGS.num_gen_images, savedir=gen_dir, export_intermediate=False)
     else:
       # use external given images (.npz) as input to generate images
       data = np.load(FLAGS.given_samples)
       data = tf.convert_to_tensor(data['images'], tf.float32)
       ddpm.generate_images(
-        given_samples=data, savedir=gen_dir, freeze_1st=True, export_intermediate=True)
+        given_samples=data, savedir=gen_dir, freeze_1st=True, export_intermediate=False)
 
   else:
     ddpm.summary()
