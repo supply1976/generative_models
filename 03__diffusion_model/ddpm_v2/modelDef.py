@@ -21,34 +21,38 @@ class DiffusionUtility:
     mu_coefs, var_coefs = (None, None)
     if self.scheduler == 'linear':
       # beta(t) = b0 + (b1-b0)*t, for 0 <= t <= 1
-      # integrated_beta(t): Bt = b0*t + 0.5*(b1-b0)*t^2, for 0 <= t <= 1
+      # integrated_beta(t): B(t) = b0*t + 0.5*(b1-b0)*t^2, for 0 <= t <= 1
       Bt = self.timesamps * self.b0 + 0.5* self.timesamps**2 * (self.b1-self.b0)
       assert np.all(Bt>=0)
-      mu_coefs = np.exp(-0.5*Bt)   ; # sqrt(alpha(t))
-      var_coefs = 1 - np.exp(-1*Bt)
-      sigma_coefs = np.sqrt(var_coefs) # sqrt(1-alpha(t))
-    
+      alpha_t = np.exp(-1*Bt)
+      # Bt=[B0,B1,B2,...,BN], B0 = 0
+      # deltaBt = [B1-B0,B2-B1,B3-B2, ..., BN-B_{N-1}]
+      #deltaBt = Bt[prev_n_step:]-Bt[0:-prev_n_step]
+    elif self.scheduler == 'cosine':
+      # alpha(t) === exp(-B(t)) = cos(t*pi/2)^2  for 0 <= t <= 1
+      # alpha(0) = 1, alpha(1) = 0
+      # B(t) = -2*log(cos(t*pi/2)) ; B(0)=0 , B(1)=inf
+      alpha_t = (np.cos(self.timesamps*np.pi/2.0))**2
+
     else:
       print("no diffusion scheduler, exit")
       return 
 
-    assert mu_coefs is not None
-    assert var_coefs is not None
-    
+    mu_coefs = np.sqrt(alpha_t) 
+    var_coefs = 1 - alpha_t
+    sigma_coefs = np.sqrt(var_coefs) # sqrt(1-alpha(t))
+    alpha_ts = alpha_t[prev_n_step:]/alpha_t[0:-prev_n_step]
     # for forward use
     self.mu_coefs = tf.constant(mu_coefs, tf.float32)
     self.var_coefs = tf.constant(var_coefs, tf.float32)
     self.sigma_coefs = tf.constant(sigma_coefs, tf.float32)
     
     # for backward use
-    # Bt=[B0,B1,B2,...,BN], B0 = 0
-    # deltaBt = [B1-B0,B2-B1,B3-B2, ..., BN-B_{N-1}]
-    deltaBt = Bt[prev_n_step:]-Bt[0:-prev_n_step]
-    reverse_var_coefs = (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:]) * (1-np.exp(-1*deltaBt))
+    reverse_var_coefs = (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:])*(1-alpha_ts)
     assert np.all(reverse_var_coefs >= 0)
     reverse_sigma_coefs = np.sqrt(reverse_var_coefs)
-    reverse_mu_coefs_t = (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:]) * (np.exp(-0.5*deltaBt))
-    reverse_mu_coefs_0 = mu_coefs[0:-prev_n_step] * (1-np.exp(-1*deltaBt))/var_coefs[prev_n_step:]
+    reverse_mu_coefs_t= (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:])*(np.sqrt(alpha_ts))
+    reverse_mu_coefs_0 = mu_coefs[0:-prev_n_step] * (1-alpha_ts)/var_coefs[prev_n_step:]
     reverse_sigma_coefs = np.insert(reverse_sigma_coefs, 0, [0.0]*prev_n_step)
     reverse_mu_coefs_t = np.insert(reverse_mu_coefs_t, 0, [0.0]*prev_n_step)
     reverse_mu_coefs_0 = np.insert(reverse_mu_coefs_0, 0, [1.0]*prev_n_step)

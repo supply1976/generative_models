@@ -100,7 +100,9 @@ def main():
   ema_network.set_weights(network.get_weights())  
 
   # Get an instance of the Gaussian Diffusion utilities
-  diff_util = modelDef.DiffusionUtility(
+  diff_util_train = modelDef.DiffusionUtility(
+    b0=0.1, b1=20, timesteps=timesteps, prev_n_step=1, scheduler=scheduler)
+  diff_util_infer = modelDef.DiffusionUtility(
     b0=0.1, b1=20, timesteps=timesteps, prev_n_step=prev_n_step, scheduler=scheduler)
    
   if FLAGS.training: 
@@ -141,7 +143,7 @@ def main():
     ddpm = modelDef.DiffusionModel(
       network=network, 
       ema_network=ema_network,
-      diff_util=diff_util,
+      diff_util=diff_util_train,
       timesteps=timesteps)
     
     logging.info("Training Start Time: {}".format(datetime.datetime.now()))
@@ -206,7 +208,7 @@ def main():
     callback_genimages = keras.callbacks.LambdaCallback(
       on_train_end=ddpm.generate_images)
     
-    logging.info("forward time steps: {}".format(timesteps))
+    logging.info("forward time steps: {}, {} scheduler".format(timesteps, scheduler))
     logging.info("learning rate: {}".format(learning_rate))
     logging.info("epochs: {}".format(epochs))
 
@@ -241,7 +243,7 @@ def main():
     ddpm = modelDef.DiffusionModel(
       network=network, 
       ema_network=ema_network,
-      diff_util=diff_util,
+      diff_util=diff_util_infer,
       timesteps=timesteps)
     init_logging(os.path.join(gen_dir, "gen_images.log"))
     logging.info("start to generate images using model: {}".format(imgen_model_path))
