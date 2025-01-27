@@ -17,6 +17,7 @@ class DiffusionUtility:
     self.CLIP_MIN = -1.0
     self.CLIP_MAX = 1.0
     self.prev_n_step = prev_n_step
+    self.pred_type = 'noise'
 
     mu_coefs, var_coefs = (None, None)
     if self.scheduler == 'linear':
@@ -27,21 +28,25 @@ class DiffusionUtility:
       alpha_t = np.exp(-1*Bt)
       # Bt=[B0,B1,B2,...,BN], B0 = 0
       # deltaBt = [B1-B0,B2-B1,B3-B2, ..., BN-B_{N-1}]
-      #deltaBt = Bt[prev_n_step:]-Bt[0:-prev_n_step]
+      deltaBt = Bt[prev_n_step:]-Bt[0:-prev_n_step]
+      assert np.all(deltaBt>=0)
+      alpha_ts = np.exp(-1*deltaBt)
+
     elif self.scheduler == 'cosine':
+      # for cosine scheduler, directly define alpha(t) is better
       # alpha(t) === exp(-B(t)) = cos(t*pi/2)^2  for 0 <= t <= 1
       # alpha(0) = 1, alpha(1) = 0
       # B(t) = -2*log(cos(t*pi/2)) ; B(0)=0 , B(1)=inf
       alpha_t = (np.cos(self.timesamps*np.pi/2.0))**2
+      alpha_ts = alpha_t[prev_n_step:]/alpha_t[0:-prev_n_step]
 
     else:
       print("no diffusion scheduler, exit")
       return 
-
+    #print(alpha_ts)
     mu_coefs = np.sqrt(alpha_t) 
     var_coefs = 1 - alpha_t
     sigma_coefs = np.sqrt(var_coefs) # sqrt(1-alpha(t))
-    alpha_ts = alpha_t[prev_n_step:]/alpha_t[0:-prev_n_step]
     # for forward use
     self.mu_coefs = tf.constant(mu_coefs, tf.float32)
     self.var_coefs = tf.constant(var_coefs, tf.float32)
@@ -53,6 +58,10 @@ class DiffusionUtility:
     reverse_sigma_coefs = np.sqrt(reverse_var_coefs)
     reverse_mu_coefs_t= (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:])*(np.sqrt(alpha_ts))
     reverse_mu_coefs_0 = mu_coefs[0:-prev_n_step] * (1-alpha_ts)/var_coefs[prev_n_step:]
+    print("reverse_mu_t", len(reverse_mu_coefs_t))
+    print(reverse_mu_coefs_t)
+    print("reverse_mu_0", len(reverse_mu_coefs_0))
+    print(reverse_mu_coefs_0)
     reverse_sigma_coefs = np.insert(reverse_sigma_coefs, 0, [0.0]*prev_n_step)
     reverse_mu_coefs_t = np.insert(reverse_mu_coefs_t, 0, [0.0]*prev_n_step)
     reverse_mu_coefs_0 = np.insert(reverse_mu_coefs_0, 0, [1.0]*prev_n_step)
@@ -73,7 +82,7 @@ class DiffusionUtility:
   def x0_estimator(self, x_t, t, pred_noise):
     sigma_t = tf.gather(self.sigma_coefs, t)
     mu_t = tf.gather(self.mu_coefs, t)
-    x_0 = (x_t - sigma_t[:,None,None,None] * pred_noise) / mu_t[:,None,None,None]
+    x_0 = (x_t - sigma_t[:,None,None,None] * pred_noise) / (mu_t[:,None,None,None])
     return x_0
 
   def q_reverse_mean_sigma(self, x_0, x_t, t):
@@ -287,6 +296,8 @@ class DiffusionModel(keras.Model):
     self.diff_util = diff_util
     self.ema = ema
     self.loss_tracker = keras.metrics.Mean(name="ema_loss")
+    
+    assert self.diff_util.pred_type is not None
 
   @property
   def metrics(self):
@@ -307,13 +318,16 @@ class DiffusionModel(keras.Model):
 
       # 4. Diffuse the images with noise
       images_t = self.diff_util.q_sample(images, t, noise)
-      #true_mean, true_sigma = self.diff_util.q_reverse_mean_sigma(images, images_t, t)
+      true_mean, true_sigma = self.diff_util.q_reverse_mean_sigma(images, images_t, t)
 
       # 5. Pass the diffused images and time steps to the network
-      pred_noise = self.network([images_t, t], training=True)
+      y_pred = self.network([images_t, t], training=True)
 
       # 6. Calculate the loss
-      loss = self.loss(noise, pred_noise)
+      if self.diff_util.pred_type=="noise":
+        loss = self.loss(noise, y_pred)
+      else:
+        loss = self.loss(true_mean, y_pred)
 
     # 7. Get the gradients
     gradients = tape.gradient(loss, self.network.trainable_weights)
@@ -350,6 +364,7 @@ class DiffusionModel(keras.Model):
         dtype=tf.float32)
     
     ini_samples = tf.identity(samples)
+    tfzeros = tf.zeros_like(samples)
 
     # 2. Sample from the model iteratively
     print("generating {} images ...".format(num_images))
@@ -358,12 +373,18 @@ class DiffusionModel(keras.Model):
     rev_timesamps = tf.range(self.timesteps, 0, -self.diff_util.prev_n_step)
     for j, t in enumerate(tqdm.tqdm(rev_timesamps)):
       tt = tf.cast(tf.fill(tf.shape(samples)[0], t), dtype=tf.int64)
-      # model predict noise
-      pred_noise = self.ema_network.predict(
-        [samples, tt], verbose=0, batch_size=1)
-      # from pred_noise to x0_recon
-      x0_recon = self.diff_util.x0_estimator(samples, tt, pred_noise)
-      pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(x0_recon, samples, tt)
+      # model prediction
+      y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
+      
+      if self.diff_util.pred_type == 'noise':
+        # from y_pred (pred_noise) to x0_recon
+        x0_recon = self.diff_util.x0_estimator(samples, tt, y_pred)
+        pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(x0_recon, samples, tt)
+      else:
+        # y_pred is mean
+        pred_mean = y_pred
+        _, pred_sigma = self.diff_util.q_reverse_mean_sigma(tfzeros, tfzeros, tt)
+      
       samples = self.diff_util.p_sample(pred_mean, pred_sigma)
 
       if freeze_1st:
