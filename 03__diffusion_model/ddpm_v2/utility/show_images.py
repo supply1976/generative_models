@@ -15,14 +15,16 @@ nums, h, w, c = images.shape
 
 images = np.clip(images, -1, 1)
 images = 0.5*(images+1)
+if c==2:
+  images = np.concatenate([images, np.zeros([nums, h, w, 1])], axis=-1)
 
-nrows, ncols = (5,5)
+nrows, ncols = (5,10)
 num_figs = nums // (nrows*ncols) 
 num_figs = num_figs if nums%(nrows*ncols)==0 else num_figs + 1
 axess = []
 for n in range(num_figs):
   if n>=5: break
-  fig, axes = plt.subplots(nrows, ncols, sharex=True, sharey=True, figsize=(8,8))
+  fig, axes = plt.subplots(nrows, ncols, sharex=True, sharey=True, figsize=(12,8))
   axes = axes.flatten()
   axess.extend(axes)
 

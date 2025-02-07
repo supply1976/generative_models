@@ -69,6 +69,9 @@ def main():
   given_samples    = imgen_dict['GIVEN_SAMPLES']
   export_interm    = imgen_dict['EXPORT_INTERM']
   prev_n_step      = imgen_dict['PREV_N_STEP']
+  if "CLIP_DENOISE" not in imgen_dict.keys():
+    imgen_dict['CLIP_DENOISE']=False
+  clip_denoise     = imgen_dict['CLIP_DENOISE']
 
   # GPU devices
   gpus = tf.config.list_physical_devices("GPU")
@@ -101,9 +104,11 @@ def main():
 
   # Get an instance of the Gaussian Diffusion utilities
   diff_util_train = modelDef.DiffusionUtility(
-    b0=0.1, b1=20, timesteps=timesteps, prev_n_step=1, scheduler=scheduler)
+    b0=0.1, b1=20, timesteps=timesteps, prev_n_step=1, 
+    clip_denoise=clip_denoise, scheduler=scheduler)
   diff_util_infer = modelDef.DiffusionUtility(
-    b0=0.1, b1=20, timesteps=timesteps, prev_n_step=prev_n_step, scheduler=scheduler)
+    b0=0.1, b1=20, timesteps=timesteps, prev_n_step=prev_n_step,
+    clip_denoise=clip_denoise, scheduler=scheduler)
    
   if FLAGS.training: 
     if dataset_name is None:
@@ -121,7 +126,7 @@ def main():
       logging_dir = os.path.join(tr_output_dir, dateID)
       os.mkdir(logging_dir)
       init_logging(os.path.join(logging_dir, "train.log"))
-      logging.info("Start a new training")
+      logging.info("[INFO] Start a new training")
       shutil.copy(FLAGS.config, os.path.join(logging_dir, "training_config.yaml"))
     else: 
       if trained_h5 is None:
@@ -137,8 +142,9 @@ def main():
       logging_dir = os.path.join(restored_model_dir, "cont_tr_"+dateID)
       os.mkdir(logging_dir)
       init_logging(os.path.join(logging_dir, "train.log"))
-      logging.info("restoring model from: {}".format(trained_h5))
-      logging.info("continous training ...")
+      logging.info("[INFO] Restoring model from: {}".format(trained_h5))
+      logging.info("[INFO] Continuous training ...")
+      shutil.copy(FLAGS.config, os.path.join(logging_dir, "training_config.yaml"))
     # Get the diffusion model (keras.Model)
     ddpm = modelDef.DiffusionModel(
       network=network, 
@@ -236,8 +242,7 @@ def main():
     assert os.path.isfile(imgen_model_path)
     model_dir = os.path.dirname(imgen_model_path)
     gen_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    gen_dir = os.path.join(model_dir, "imgen_"+gen_date)
-    os.mkdir(gen_dir)
+
     load_status = ema_network.load_weights(imgen_model_path)
     network.set_weights(ema_network.get_weights())
     ddpm = modelDef.DiffusionModel(
@@ -245,9 +250,14 @@ def main():
       ema_network=ema_network,
       diff_util=diff_util_infer,
       timesteps=timesteps)
+    gen_steps = diff_util_infer.timesteps // diff_util_infer.prev_n_step
+    gen_dir = os.path.join(model_dir, "imgen_"+str(gen_steps)+"steps_"+gen_date)
+    os.mkdir(gen_dir)
+    
     init_logging(os.path.join(gen_dir, "gen_images.log"))
     logging.info("start to generate images using model: {}".format(imgen_model_path))
-    
+    logging.info("set clip_denoise to {}".format(diff_util_infer.clip_denoise))
+     
     if given_samples is None:
       logging.info("use gaussian random noise to generate images")
       t0 = time.time()
@@ -255,12 +265,28 @@ def main():
         num_images=num_gen_images, savedir=gen_dir, export_interm=export_interm)
       deltaT = np.around((time.time()-t0)/3600, 4)
       logging.info("generate {} images with {} hours".format(num_gen_images, deltaT))
-    else:
-      # use external given images (.npz) as input to generate images
+    
+    elif given_samples == "debug":
+      logging.info("DEBUG Mode")
+      img_input, _ = ddpm.network.inputs
+      _, imgh, imgw, imgc = img_input.shape
+      samples = tf.random.normal(shape=(1, imgh,imgw,imgc),dtype=tf.float32)
+      samples = tf.tile(samples, [10,1,1,1])
+      np.savez_compressed(os.path.join(gen_dir, "input.npz"), images=samples.numpy())
+      logging.info("input: 10 idential noise")
+      ddpm.generate_images(
+        given_samples=samples, savedir=gen_dir, export_interm=export_interm)
+        
+    else: 
+      logging.info("use external given images (.npz) as input to generate images")
       data = np.load(given_samples)
       data = tf.convert_to_tensor(data['images'], tf.float32)
       ddpm.generate_images(
-        given_samples=data, savedir=gen_dir, freeze_1st=True, export_interm=export_interm)
+        given_samples=data, 
+        savedir=gen_dir, 
+        freeze_1st=True,
+        save_ini=True,
+        export_interm=export_interm)
 
   else:
     ddpm.summary()

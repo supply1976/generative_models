@@ -7,17 +7,20 @@ import tqdm
 
 
 class DiffusionUtility:
-  def __init__(self, b0=0.1, b1=20, timesteps=100, prev_n_step=1, scheduler='linear'):
+  def __init__(self, 
+    b0=0.1, b1=20, scheduler='linear', timesteps=1000, 
+    pred_type='noise', clip_denoise=False, prev_n_step=1):
     self.b0 = b0
     self.b1 = b1
-    self.timesteps = timesteps
     self.scheduler = scheduler
+    self.timesteps = timesteps
     self.timesamps = np.linspace(0, 1, timesteps+1, dtype=np.float64)
     self.eps = 1.0e-6
     self.CLIP_MIN = -1.0
     self.CLIP_MAX = 1.0
     self.prev_n_step = prev_n_step
-    self.pred_type = 'noise'
+    self.pred_type = pred_type
+    self.clip_denoise = clip_denoise
 
     mu_coefs, var_coefs = (None, None)
     if self.scheduler == 'linear':
@@ -38,30 +41,31 @@ class DiffusionUtility:
       # alpha(0) = 1, alpha(1) = 0
       # B(t) = -2*log(cos(t*pi/2)) ; B(0)=0 , B(1)=inf
       alpha_t = (np.cos(self.timesamps*np.pi/2.0))**2
+      alpha_t[-1]=alpha_t[-2]
       alpha_ts = alpha_t[prev_n_step:]/alpha_t[0:-prev_n_step]
 
     else:
-      print("no diffusion scheduler, exit")
+      print("not supported diffusion scheduler, exit")
       return 
     #print(alpha_ts)
     mu_coefs = np.sqrt(alpha_t) 
     var_coefs = 1 - alpha_t
     sigma_coefs = np.sqrt(var_coefs) # sqrt(1-alpha(t))
-    # for forward use
+    # for forward sampling
     self.mu_coefs = tf.constant(mu_coefs, tf.float32)
     self.var_coefs = tf.constant(var_coefs, tf.float32)
     self.sigma_coefs = tf.constant(sigma_coefs, tf.float32)
     
-    # for backward use
+    # for reverse sampling
     reverse_var_coefs = (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:])*(1-alpha_ts)
     assert np.all(reverse_var_coefs >= 0)
     reverse_sigma_coefs = np.sqrt(reverse_var_coefs)
     reverse_mu_coefs_t= (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:])*(np.sqrt(alpha_ts))
     reverse_mu_coefs_0 = mu_coefs[0:-prev_n_step] * (1-alpha_ts)/var_coefs[prev_n_step:]
-    print("reverse_mu_t", len(reverse_mu_coefs_t))
-    print(reverse_mu_coefs_t)
-    print("reverse_mu_0", len(reverse_mu_coefs_0))
-    print(reverse_mu_coefs_0)
+    #print("reverse_mu_t", len(reverse_mu_coefs_t))
+    #print(reverse_mu_coefs_t)
+    #print("reverse_mu_0", len(reverse_mu_coefs_0))
+    #print(reverse_mu_coefs_0)
     reverse_sigma_coefs = np.insert(reverse_sigma_coefs, 0, [0.0]*prev_n_step)
     reverse_mu_coefs_t = np.insert(reverse_mu_coefs_t, 0, [0.0]*prev_n_step)
     reverse_mu_coefs_0 = np.insert(reverse_mu_coefs_0, 0, [1.0]*prev_n_step)
@@ -70,10 +74,12 @@ class DiffusionUtility:
     self.reverse_mu_coefs_0 = tf.constant(reverse_mu_coefs_0, tf.float32)
 
   def q_sample(self, x_0, t, noise):
-    # forward sampling
-    # x_0: 4D input tensor
-    # t: integer index tensor: 1, 2, 3, ..., N
-    # noise: 4D [batch, h, w, c] gaussian random number tensor
+    """
+      Forward Sampling (noising process)
+      x_0: 4D input tensor, shape=[batch, h, w, c]
+      t: 1D integer index tensor, shape=[batch], value=0, 1, 2, 3, ..., N
+      noise: 4D gaussian random number tensor, shape=[batch, h, w, c]
+    """
     sigma_t = tf.gather(self.sigma_coefs, t)
     mu_t = tf.gather(self.mu_coefs, t)
     x_t = mu_t[:,None,None,None]*x_0 + sigma_t[:,None,None,None] * noise
@@ -83,26 +89,29 @@ class DiffusionUtility:
     sigma_t = tf.gather(self.sigma_coefs, t)
     mu_t = tf.gather(self.mu_coefs, t)
     x_0 = (x_t - sigma_t[:,None,None,None] * pred_noise) / (mu_t[:,None,None,None])
+    #print(x_0.numpy().max(), x_0.numpy().min())
+    if self.clip_denoise:
+      x_0 = tf.clip_by_value(x_0, self.CLIP_MIN, self.CLIP_MAX)
     return x_0
 
   def q_reverse_mean_sigma(self, x_0, x_t, t):
     """
-    Compute the mean and variance of the 
-    diffusion posterior q(x_{t-1} | x_t, x_0).
-    t: integer index tensor: 1, 2, 3, ..., N
+      Compute the mean and variance of the 
+      diffusion posterior q(x_s | x_t, x_0).
+      s = t-n, n>=1
+      t: 1D integer index tensor: 1, 2, 3, ..., N
 
     """
     c_mu_t = tf.gather(self.reverse_mu_coefs_t, t)
     c_mu_0 = tf.gather(self.reverse_mu_coefs_0, t)
-    mean_tn1 = c_mu_0[:,None,None,None]*x_0 + c_mu_t[:,None,None,None] * x_t
-    #var_tn1 = tf.gather(self.reverse_var_coefs, t)
-    sigma_tn1 = tf.gather(self.reverse_sigma_coefs, t)
-    return (mean_tn1, sigma_tn1[:,None,None,None])
+    mean_s = c_mu_0[:,None,None,None]*x_0 + c_mu_t[:,None,None,None] * x_t
+    sigma_s = tf.gather(self.reverse_sigma_coefs, t)
+    return (mean_s, sigma_s[:,None,None,None])
 
   def p_sample(self, pred_mean, pred_sigma):
     noise = tf.random.normal(shape=pred_mean.shape, dtype=tf.float32)
-    x_tn1 = pred_mean + pred_sigma * noise
-    return x_tn1
+    x_s = pred_mean + pred_sigma * noise
+    return x_s
 
 
 # Kernel initializer to use
@@ -326,8 +335,10 @@ class DiffusionModel(keras.Model):
       # 6. Calculate the loss
       if self.diff_util.pred_type=="noise":
         loss = self.loss(noise, y_pred)
-      else:
+      elif self.diff_util.pred_type=='mean':
         loss = self.loss(true_mean, y_pred)
+      else:
+        loss = None
 
     # 7. Get the gradients
     gradients = tape.gradient(loss, self.network.trainable_weights)
@@ -344,13 +355,15 @@ class DiffusionModel(keras.Model):
     return {"loss": self.loss_tracker.result()}
 
   def save_model(self, epoch, logs=None, savedir=None):
-    epo = str(epoch).zfill(4)
-    if (epoch+1)%500==0:
+    epo = str(epoch).zfill(5)
+    if epoch%1000==0:
       self.ema_network.save_weights(os.path.join(savedir, f"ema_epoch_{epo}.weights.h5"))
     self.ema_network.save_weights(os.path.join(savedir, "ema_best.weights.h5"))
 
-  def generate_images(self, epoch=None, logs=None, savedir='./', num_images=10, 
-    freeze_1st=False, given_samples=None, export_interm=False):
+  def generate_images(self, epoch=None, logs=None, 
+    savedir='./', num_images=10, _freeze=False, 
+    given_samples=None, save_ini=False, export_interm=False):
+    #
     img_input, _ = self.network.inputs
     print("image input shape = {}".format(img_input.shape))
     _, img_size, _, img_channel = img_input.shape
@@ -358,47 +371,62 @@ class DiffusionModel(keras.Model):
     if given_samples is not None:
       samples = given_samples
     else:
-      # 1. Randomly sample noise (starting point for reverse process)
+      # 1. Randomly sample noise (starting point for reverse process) 
       samples = tf.random.normal(
         shape=(num_images, img_size, img_size, img_channel),
         dtype=tf.float32)
     
     ini_samples = tf.identity(samples)
     tfzeros = tf.zeros_like(samples)
-
+    n_imgs, _, _, _ = ini_samples.shape
+    
     # 2. Sample from the model iteratively
-    print("generating {} images ...".format(num_images))
+    print("generating {} images ...".format(n_imgs))
     # reverse time index:
-    # example: tf.range(100, 0, -1) = [100,99,...,3,2,1]
-    rev_timesamps = tf.range(self.timesteps, 0, -self.diff_util.prev_n_step)
-    for j, t in enumerate(tqdm.tqdm(rev_timesamps)):
+    # example: 
+    #   tf.range(100,  0, -1) =  [100,99,...,3,2,1]
+    #   tf.range(1000, 0, -10) = [1000,990,...,30,20,10]
+    reverse_timeindex = tf.range(self.timesteps, 0, -self.diff_util.prev_n_step)
+    for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
       tt = tf.cast(tf.fill(tf.shape(samples)[0], t), dtype=tf.int64)
       # model prediction
       y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
       
       if self.diff_util.pred_type == 'noise':
+        # y_pred is pred_noise
         # from y_pred (pred_noise) to x0_recon
         x0_recon = self.diff_util.x0_estimator(samples, tt, y_pred)
         pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(x0_recon, samples, tt)
-      else:
-        # y_pred is mean
+      elif self.diff_util.pred_type == "mean":
+        # y_pred is pred_mean
         pred_mean = y_pred
         _, pred_sigma = self.diff_util.q_reverse_mean_sigma(tfzeros, tfzeros, tt)
-      
+      else:
+        return
       samples = self.diff_util.p_sample(pred_mean, pred_sigma)
 
-      if freeze_1st:
-        samples = tf.stack([ini_samples[:,:,:,0], samples[:,:,:,1]], axis=-1)
+      if _freeze:
+        #samples = tf.stack([ini_samples[:,:,:,0], samples[:,:,:,1]], axis=-1)
+        arr_0 = ini_samples.numpy()
+        arr_i = samples.numpy()
+        arr_0[:, 32:-32, 32:-32, :] = arr_i[:, 32:-32, 32:-32, :]
+        samples = tf.convert_to_tensor(arr_0, dtype=tf.float32)
 
       if export_interm and t.numpy()%10==0:
-        output_fn = os.path.join(savedir, "img_t_"+str(t.numpy())+".npz")
+        output_fn = os.path.join(savedir, "img_raw_t_"+str(t.numpy())+".npz")
         np.savez_compressed(output_fn, images=samples.numpy())
+    
     # 3. Return generated samples
     #samples = tf.clip_by_value(samples, -1, 1)
     #samples = 0.5*(samples+1) ; # (-1, 1) -> (0, 1)
     ss = "x".join(list(map(str, samples.numpy().shape)))
     output_fn = os.path.join(savedir, "gen_"+ss+"_raw.npz")
-    np.savez_compressed(output_fn, images=samples.numpy())
+    d={}
+    d['images']=samples.numpy()
+    if save_ini:
+      d['inputs']=ini_samples.numpy()
+    np.savez_compressed(output_fn, **d)
+    print("Images Generation Done, save to {}".format(output_fn))
     return samples
 
 
