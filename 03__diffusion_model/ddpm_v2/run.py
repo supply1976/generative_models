@@ -49,6 +49,9 @@ def main():
   if not os.path.isdir(training_output_dir): os.mkdir(training_output_dir)
   is_new_train       = training_dict['IS_NEW_TRAIN']
   trained_h5         = training_dict['TRAINED_H5']
+  if "PRED_TYPE" not in training_dict.keys():
+    training_dict['PRED_TYPE'] = "noise"
+  pred_type          = training_dict['PRED_TYPE']
   # network
   scheduler          = training_dict['NETWORK']['SCHEDULER']
   timesteps          = training_dict['NETWORK']['TIMESTEPS']
@@ -104,10 +107,10 @@ def main():
 
   # Get an instance of the Gaussian Diffusion utilities
   diff_util_train = modelDef.DiffusionUtility(
-    b0=0.1, b1=20, timesteps=timesteps, prev_n_step=1, 
+    b0=0.1, b1=20, timesteps=timesteps, pred_type=pred_type, prev_n_step=1, 
     clip_denoise=clip_denoise, scheduler=scheduler)
   diff_util_infer = modelDef.DiffusionUtility(
-    b0=0.1, b1=20, timesteps=timesteps, prev_n_step=prev_n_step,
+    b0=0.1, b1=20, timesteps=timesteps, pred_type=pred_type, prev_n_step=prev_n_step,
     clip_denoise=clip_denoise, scheduler=scheduler)
    
   if FLAGS.training: 
@@ -255,8 +258,9 @@ def main():
     os.mkdir(gen_dir)
     
     init_logging(os.path.join(gen_dir, "gen_images.log"))
-    logging.info("start to generate images using model: {}".format(imgen_model_path))
-    logging.info("set clip_denoise to {}".format(diff_util_infer.clip_denoise))
+    logging.info("[IMGEN] Start to generate images using model: {}".format(imgen_model_path))
+    logging.info("[IMGEN] Set clip_denoise to {}".format(diff_util_infer.clip_denoise))
+    logging.info("[IMGEN] x0 is reconstructed by pred_{}".format(diff_util_infer.pred_type))
      
     if given_samples is None:
       logging.info("use gaussian random noise to generate images")

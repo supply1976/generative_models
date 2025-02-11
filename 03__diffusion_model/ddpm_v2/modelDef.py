@@ -47,11 +47,11 @@ class DiffusionUtility:
     else:
       print("not supported diffusion scheduler, exit")
       return 
-    #print(alpha_ts)
+    
+    # for forward sampling
     mu_coefs = np.sqrt(alpha_t) 
     var_coefs = 1 - alpha_t
     sigma_coefs = np.sqrt(var_coefs) # sqrt(1-alpha(t))
-    # for forward sampling
     self.mu_coefs = tf.constant(mu_coefs, tf.float32)
     self.var_coefs = tf.constant(var_coefs, tf.float32)
     self.sigma_coefs = tf.constant(sigma_coefs, tf.float32)
@@ -62,10 +62,6 @@ class DiffusionUtility:
     reverse_sigma_coefs = np.sqrt(reverse_var_coefs)
     reverse_mu_coefs_t= (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:])*(np.sqrt(alpha_ts))
     reverse_mu_coefs_0 = mu_coefs[0:-prev_n_step] * (1-alpha_ts)/var_coefs[prev_n_step:]
-    #print("reverse_mu_t", len(reverse_mu_coefs_t))
-    #print(reverse_mu_coefs_t)
-    #print("reverse_mu_0", len(reverse_mu_coefs_0))
-    #print(reverse_mu_coefs_0)
     reverse_sigma_coefs = np.insert(reverse_sigma_coefs, 0, [0.0]*prev_n_step)
     reverse_mu_coefs_t = np.insert(reverse_mu_coefs_t, 0, [0.0]*prev_n_step)
     reverse_mu_coefs_0 = np.insert(reverse_mu_coefs_0, 0, [1.0]*prev_n_step)
@@ -86,6 +82,9 @@ class DiffusionUtility:
     return x_t
   
   def x0_estimator(self, x_t, t, pred_noise):
+    """
+      Reconstruct x0 by pred_noise, this is original DDPM method
+    """
     sigma_t = tf.gather(self.sigma_coefs, t)
     mu_t = tf.gather(self.mu_coefs, t)
     x_0 = (x_t - sigma_t[:,None,None,None] * pred_noise) / (mu_t[:,None,None,None])
@@ -96,11 +95,9 @@ class DiffusionUtility:
 
   def q_reverse_mean_sigma(self, x_0, x_t, t):
     """
-      Compute the mean and variance of the 
-      diffusion posterior q(x_s | x_t, x_0).
+      Compute the mean and variance of the diffusion posterior q(x_s | x_t, x_0).
       s = t-n, n>=1
       t: 1D integer index tensor: 1, 2, 3, ..., N
-
     """
     c_mu_t = tf.gather(self.reverse_mu_coefs_t, t)
     c_mu_0 = tf.gather(self.reverse_mu_coefs_0, t)
@@ -327,7 +324,6 @@ class DiffusionModel(keras.Model):
 
       # 4. Diffuse the images with noise
       images_t = self.diff_util.q_sample(images, t, noise)
-      true_mean, true_sigma = self.diff_util.q_reverse_mean_sigma(images, images_t, t)
 
       # 5. Pass the diffused images and time steps to the network
       y_pred = self.network([images_t, t], training=True)
@@ -335,8 +331,8 @@ class DiffusionModel(keras.Model):
       # 6. Calculate the loss
       if self.diff_util.pred_type=="noise":
         loss = self.loss(noise, y_pred)
-      elif self.diff_util.pred_type=='mean':
-        loss = self.loss(true_mean, y_pred)
+      elif self.diff_util.pred_type=='x0':
+        loss = self.loss(images, y_pred)
       else:
         loss = None
 
@@ -394,15 +390,13 @@ class DiffusionModel(keras.Model):
       
       if self.diff_util.pred_type == 'noise':
         # y_pred is pred_noise
-        # from y_pred (pred_noise) to x0_recon
         x0_recon = self.diff_util.x0_estimator(samples, tt, y_pred)
-        pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(x0_recon, samples, tt)
-      elif self.diff_util.pred_type == "mean":
-        # y_pred is pred_mean
-        pred_mean = y_pred
-        _, pred_sigma = self.diff_util.q_reverse_mean_sigma(tfzeros, tfzeros, tt)
+      elif self.diff_util.pred_type == "x0":
+        # y_pred is pred_x0
+        x0_recon = y_pred
       else:
         return
+      pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(x0_recon, samples, tt)
       samples = self.diff_util.p_sample(pred_mean, pred_sigma)
 
       if _freeze:
