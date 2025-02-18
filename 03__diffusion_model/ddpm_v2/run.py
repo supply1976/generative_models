@@ -26,6 +26,7 @@ def main():
   parser.add_argument("--config", type=str, required=True)
   parser.add_argument("--training", dest='training', action='store_true')
   parser.add_argument("--imgen", dest='imgen', action='store_true')
+  parser.add_argument("--regen_with_clip_denoise", action='store_true')
   FLAGS, _ = parser.parse_known_args()
   
   with open(FLAGS.config, 'r') as f:
@@ -49,9 +50,7 @@ def main():
   if not os.path.isdir(training_output_dir): os.mkdir(training_output_dir)
   is_new_train       = training_dict['IS_NEW_TRAIN']
   trained_h5         = training_dict['TRAINED_H5']
-  if "PRED_TYPE" not in training_dict.keys():
-    training_dict['PRED_TYPE'] = "noise"
-  pred_type          = training_dict['PRED_TYPE']
+  model_pred         = training_dict['MODEL_PRED']
   # network
   scheduler          = training_dict['NETWORK']['SCHEDULER']
   timesteps          = training_dict['NETWORK']['TIMESTEPS']
@@ -66,15 +65,16 @@ def main():
   epochs        = training_dict['HYPER_PARAMETERS']['EPOCHS']
   batch_size    = training_dict['HYPER_PARAMETERS']['BATCH_SIZE']
   learning_rate = training_dict['HYPER_PARAMETERS']['LEARNING_RATE']
-  # imgen
+  # for image generation (imgen)
   imgen_model_path = imgen_dict['MODEL_PATH']
   num_gen_images   = imgen_dict['NUM_GEN_IMAGES']
-  given_samples    = imgen_dict['GIVEN_SAMPLES']
   export_interm    = imgen_dict['EXPORT_INTERM']
-  prev_n_step      = imgen_dict['PREV_N_STEP']
-  if "CLIP_DENOISE" not in imgen_dict.keys():
-    imgen_dict['CLIP_DENOISE']=False
-  clip_denoise     = imgen_dict['CLIP_DENOISE']
+  reverse_stride   = imgen_dict['REVERSE_STRIDE']
+  gen_inputs       = imgen_dict['GEN_INPUTS']
+  gen_method       = imgen_dict['GEN_METHOD']
+  gen_output_dir   = imgen_dict['GEN_OUTPUT_DIR']
+  ddim_eta         = imgen_dict['DDIM_ETA']
+  random_seed      = imgen_dict['RANDOM_SEED']
 
   # GPU devices
   gpus = tf.config.list_physical_devices("GPU")
@@ -84,7 +84,6 @@ def main():
   network = modelDef.build_model(
     image_size    = input_image_size, 
     image_channel = input_image_channel,
-    first_channel = first_channel,
     widths = widths,
     has_attention = has_attention,
     num_resnet_blocks = num_resnet_blocks,
@@ -94,7 +93,6 @@ def main():
   ema_network = modelDef.build_model(
     image_size    = input_image_size, 
     image_channel = input_image_channel,
-    first_channel = first_channel,
     widths = widths,
     has_attention = has_attention,
     num_resnet_blocks = num_resnet_blocks,
@@ -106,16 +104,22 @@ def main():
   ema_network.set_weights(network.get_weights())  
 
   # Get an instance of the Gaussian Diffusion utilities
+  # util for training
   diff_util_train = modelDef.DiffusionUtility(
-    b0=0.1, b1=20, timesteps=timesteps, pred_type=pred_type, prev_n_step=1, 
-    clip_denoise=clip_denoise, scheduler=scheduler)
+    b0=0.1, b1=20, timesteps=timesteps, 
+    scheduler=scheduler, model_pred=model_pred, reverse_stride=1
+    )
+  # util for inference
   diff_util_infer = modelDef.DiffusionUtility(
-    b0=0.1, b1=20, timesteps=timesteps, pred_type=pred_type, prev_n_step=prev_n_step,
-    clip_denoise=clip_denoise, scheduler=scheduler)
+    b0=0.1, b1=20, timesteps=timesteps, 
+    scheduler=scheduler, model_pred=model_pred, reverse_stride=reverse_stride,
+    gen_method=gen_method, ddim_eta=ddim_eta,
+    )
    
   if FLAGS.training: 
     if dataset_name is None:
-      logging.info("no training dataset name is provided, exit")
+      print("Training dataset name not found, Please provide training dataset name.")
+      print("Exit")
       return 
     train_ds = None
     dateID = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -136,7 +140,7 @@ def main():
         logging.info('if "IS_NEW_TRAIN: false", you must provide a trained .h5 file')
         return 
       else:
-        # .h5 file
+        # load .h5 file
         trained_h5 = os.path.abspath(trained_h5)
         restored_model_dir = os.path.dirname(trained_h5)
         load_status = ema_network.load_weights(trained_h5)
@@ -155,12 +159,12 @@ def main():
       diff_util=diff_util_train,
       timesteps=timesteps)
     
-    logging.info("Training Start Time: {}".format(datetime.datetime.now()))
+    logging.info("[INFO] Training Start Time: {}".format(datetime.datetime.now()))
     t0 = time.time()
     if dataset_name in ["cifar10", "mnist"]:
       # use internal keras dataset for quick testing
       # ignore dataset_path when use these two dataset_name
-      logging.info("use internal keras dataset {} as training data".format(dataset_name))
+      logging.info("[INFO] use internal keras dataset {} ".format(dataset_name))
       if dataset_name == "cifar10":
         (train_images, train_labels), _ = keras.datasets.cifar10.load_data()
         #ID, _ = np.where(train_labels==1)
@@ -183,12 +187,13 @@ def main():
     else:
       # for other dataset_name, check the dataset_path
       if dataset_path is None:
-        logging.info("Please provide dataset path, Exit")
+        logging.error("Please provide dataset path, Exit")
         return
       else:
-        logging.info("user defined dataset name:{}".format(dataset_name))
+        logging.info("[INFO] user defined dataset name:{}".format(dataset_name))
         if os.path.isdir(dataset_path):
-          logging.info("use a folder contains multiple npz files for training")
+          logging.info("[INFO] use a folder contains multiple npz files for training")
+          logging.info("[INFO] dataset path: {}".format(dataset_path))
           dataloader = DataLoader(data_dir=dataset_path, crop_size=clip_size)
           train_ds = dataloader.load_dataset()
         elif os.path.isfile(dataset_path):
@@ -217,9 +222,10 @@ def main():
     callback_genimages = keras.callbacks.LambdaCallback(
       on_train_end=ddpm.generate_images)
     
-    logging.info("forward time steps: {}, {} scheduler".format(timesteps, scheduler))
-    logging.info("learning rate: {}".format(learning_rate))
-    logging.info("epochs: {}".format(epochs))
+    logging.info("[INFO] Forward Training Steps: {}".format(timesteps))
+    logging.info("[INFO] Scheduler: {} ".format(scheduler))
+    logging.info("[INFO] Learning Rate: {}".format(learning_rate))
+    logging.info("[INFO] Total Epochs: {}".format(epochs))
 
     csv_logger = CSVLogger(os.path.join(logging_dir, "log.csv"), append=True, separator=",")
     callback_list = [csv_logger, callback_save_model, callback_genimages]
@@ -238,7 +244,7 @@ def main():
     #ema_network.save_weights(os.path.join(logging_dir, "ema_final.weights.h5"))
     deltaT = np.around((time.time() - t0)/3600.0, 4)
     nowT = datetime.datetime.now()
-    logging.info("Training End: {}, elapsed time: {} hours".format(nowT, deltaT))
+    logging.info("[INFO] Training End: {}, elapsed time: {} hours".format(nowT, deltaT))
     
   elif FLAGS.imgen:
     assert imgen_model_path is not None
@@ -253,45 +259,88 @@ def main():
       ema_network=ema_network,
       diff_util=diff_util_infer,
       timesteps=timesteps)
-    gen_steps = diff_util_infer.timesteps // diff_util_infer.prev_n_step
-    gen_dir = os.path.join(model_dir, "imgen_"+str(gen_steps)+"steps_"+gen_date)
-    os.mkdir(gen_dir)
     
-    init_logging(os.path.join(gen_dir, "gen_images.log"))
+    if gen_output_dir is None: 
+      gen_steps = str(diff_util_infer.timesteps // diff_util_infer.reverse_stride)+"steps"
+      gen_dir = "_".join(["imgen",diff_util_infer.gen_method,gen_steps,gen_date])
+      gen_dir = os.path.join(model_dir, gen_dir)
+      os.mkdir(gen_dir)
+    else:
+      gen_dir = gen_output_dir
+      if not os.path.isdir(gen_dir): os.mkdir(gen_dir)
+    
+    init_logging(os.path.join(gen_dir, "imgen.log"))
     logging.info("[IMGEN] Start to generate images using model: {}".format(imgen_model_path))
-    logging.info("[IMGEN] Set clip_denoise to {}".format(diff_util_infer.clip_denoise))
-    logging.info("[IMGEN] x0 is reconstructed by pred_{}".format(diff_util_infer.pred_type))
-     
-    if given_samples is None:
-      logging.info("use gaussian random noise to generate images")
-      t0 = time.time()
-      ddpm.generate_images(
-        num_images=num_gen_images, savedir=gen_dir, export_interm=export_interm)
-      deltaT = np.around((time.time()-t0)/3600, 4)
-      logging.info("generate {} images with {} hours".format(num_gen_images, deltaT))
+    logging.info("[IMGEN] model output: {}".format(diff_util_infer.model_pred))
+    logging.info("[IMGEN] use {} reverse sampling formula".format(
+      diff_util_infer.gen_method.upper()))
+    if diff_util_infer.gen_method=='ddim':
+      logging.info("[IMGEN] DDIM eta = {}".format(diff_util_infer.ddim_eta))
+
+    logging.info("[IMGEN] set random seed: {}".format(random_seed))
+    tf.random.set_seed(random_seed)
+
+    if gen_inputs is None:
+      logging.info("Generating Images from pure random noise")
+      pass
+
+    elif os.path.isfile(gen_inputs) and gen_inputs.endswith('npz'):
+      logging.info("Use external .npz file as start to generate images")
+      logging.info("Generating Images from {}".format(gen_inputs))
+      data = np.load(gen_inputs)['images']
+      gen_inputs = tf.convert_to_tensor(data, tf.float32)
     
-    elif given_samples == "debug":
-      logging.info("DEBUG Mode")
-      img_input, _ = ddpm.network.inputs
-      _, imgh, imgw, imgc = img_input.shape
-      samples = tf.random.normal(shape=(1, imgh,imgw,imgc),dtype=tf.float32)
-      samples = tf.tile(samples, [10,1,1,1])
-      np.savez_compressed(os.path.join(gen_dir, "input.npz"), images=samples.numpy())
-      logging.info("input: 10 idential noise")
+    elif gen_inputs == "identical_noise":
+      logging.info("Generating Images from identical noise")
+      _shape=(1, input_image_size, input_image_size, input_image_channel)
+      gen_inputs = tf.random.normal(shape=_shape, dtype=tf.float32)
+      gen_inputs = tf.tile(gen_inputs, [num_gen_images, 1,1,1])
+
+    elif gen_inputs == "custom":
+      _shape=(1, input_image_size, input_image_size, input_image_channel)
+      tf.random.set_seed(1)
+      z1 = tf.random.normal(shape=_shape, dtype=tf.float32)
+      tf.random.set_seed(2)
+      z2 = tf.random.normal(shape=_shape, dtype=tf.float32)
+      theta = np.linspace(0, 1, 11)
+      v = np.cos(theta*np.pi/2)
+      z = (v[:,None,None,None])*z1 + np.sqrt((1-v[:,None,None,None]**2))*z2
+      gen_inputs = z
+
+    elif gen_inputs == "gen_random_seed_map":
+      _shape=(1, input_image_size, input_image_size, input_image_channel)
+      zlist = []
+      for seed in range(10):
+        tf.random.set_seed(seed)
+        zlist.append(tf.random.normal(shape=_shape, dtype=tf.float32))
+      gen_inputs = tf.concat(zlist, axis=0)
+
+    else:
+      return
+
+    t0 = time.time()
+    ddpm.generate_images(
+      num_images=num_gen_images, 
+      savedir=gen_dir,
+      save_ini=True,
+      _freeze=True,
+      gen_inputs=gen_inputs,
+      export_interm=export_interm)
+    deltaT = np.around((time.time()-t0)/3600, 4)
+    logging.info("Generated {} images with {} hours".format(num_gen_images, deltaT))
+
+    # reset random_seed and repeat generation with clip_denoise=True
+    if FLAGS.regen_with_clip_denoise:
+      print("reset random_seed and repeat generation with clip_denoise=True")
+      tf.random.set_seed(random_seed)
       ddpm.generate_images(
-        given_samples=samples, savedir=gen_dir, export_interm=export_interm)
-        
-    else: 
-      logging.info("use external given images (.npz) as input to generate images")
-      data = np.load(given_samples)
-      data = tf.convert_to_tensor(data['images'], tf.float32)
-      ddpm.generate_images(
-        given_samples=data, 
-        savedir=gen_dir, 
-        freeze_1st=True,
-        save_ini=True,
+        num_images=num_gen_images, 
+        savedir=gen_dir,
+        gen_inputs=gen_inputs,
+        clip_denoise=True,
         export_interm=export_interm)
 
+     
   else:
     ddpm.summary()
     print("no action")

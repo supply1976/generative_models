@@ -8,8 +8,9 @@ import tqdm
 
 class DiffusionUtility:
   def __init__(self, 
-    b0=0.1, b1=20, scheduler='linear', timesteps=1000, 
-    pred_type='noise', clip_denoise=False, prev_n_step=1):
+    b0=0.1, b1=20.0, scheduler='linear', timesteps=1000, model_pred='noise', 
+    reverse_stride=1, gen_method='ddim', ddim_eta = 1.0,
+    ):
     self.b0 = b0
     self.b1 = b1
     self.scheduler = scheduler
@@ -18,32 +19,56 @@ class DiffusionUtility:
     self.eps = 1.0e-6
     self.CLIP_MIN = -1.0
     self.CLIP_MAX = 1.0
-    self.prev_n_step = prev_n_step
-    self.pred_type = pred_type
-    self.clip_denoise = clip_denoise
+    self.reverse_stride = reverse_stride
+    self.model_pred = model_pred
+    self.gen_method = gen_method
+    self.ddim_eta = ddim_eta
+    assert isinstance(timesteps, int)
+    assert isinstance(reverse_stride, int)
+    assert timesteps % reverse_stride == 0
 
     mu_coefs, var_coefs = (None, None)
     if self.scheduler == 'linear':
-      # beta(t) = b0 + (b1-b0)*t, for 0 <= t <= 1
-      # integrated_beta(t): B(t) = b0*t + 0.5*(b1-b0)*t^2, for 0 <= t <= 1
+      """
+      same as original DDPM paper, normalize time to 0 ~ 1
+      beta(t) = b0 + (b1-b0)*t, for 0 <= t <= 1
+      integrated_beta(t): B(t) = b0*t + 0.5*(b1-b0)*t^2, for 0 <= t <= 1
+      alpha(t) === exp(-B(t))
+      alpha_ts === alpha(t)/alpha(s), for t > s >=0
+      for discrete time sampling:
+        alpha(s) = alpha(t-n) for n>=1, n is the reverse stride
+      """
       Bt = self.timesamps * self.b0 + 0.5* self.timesamps**2 * (self.b1-self.b0)
+      # Bt=[B0,B1,B2,...,BN], B0 = 0
       assert np.all(Bt>=0)
       alpha_t = np.exp(-1*Bt)
-      # Bt=[B0,B1,B2,...,BN], B0 = 0
-      # deltaBt = [B1-B0,B2-B1,B3-B2, ..., BN-B_{N-1}]
-      deltaBt = Bt[prev_n_step:]-Bt[0:-prev_n_step]
+      deltaBt = Bt[reverse_stride:]-Bt[0:-reverse_stride]
+      assert len(Bt)==timesteps+1
+      assert len(deltaBt)==len(Bt)-reverse_stride
       assert np.all(deltaBt>=0)
+      # alpha_ts === alpha(t) / alpha(s) for t > s >= 0
       alpha_ts = np.exp(-1*deltaBt)
 
     elif self.scheduler == 'cosine':
-      # for cosine scheduler, directly define alpha(t) is better
-      # alpha(t) === exp(-B(t)) = cos(t*pi/2)^2  for 0 <= t <= 1
-      # alpha(0) = 1, alpha(1) = 0
-      # B(t) = -2*log(cos(t*pi/2)) ; B(0)=0 , B(1)=inf
+      """
+      same as iDDPM paper, use cosine scheduler for alpha(t)
+      for cosine scheduler, 
+      directly define alpha(t) is better than defining beta(t)
+      alpha(t) === exp(-B(t)) = cos(t*pi/2)^2  ; for 0 <= t <= 1
+        --> alpha(0) = 1, alpha(1) = 0
+      B(t) = -2*log(cos(t*pi/2))
+        --> B(0)=0 , B(1)=inf
+      beta(t) === dB(t)/dt = tan(t*pi/2)
+        --> beta(0)=0, beta(1)=inf
+      """
       alpha_t = (np.cos(self.timesamps*np.pi/2.0))**2
+      # the last element of alpha_t (at time=1): alpha_t[-1] = 0 (10^-31)
+      # which cause numerical issue in reverse sampling
+      # so set this to the value at time=0.999
+      # alpha_t[-1] = alpha_t[-2] ~ 10^-6
       alpha_t[-1]=alpha_t[-2]
-      alpha_ts = alpha_t[prev_n_step:]/alpha_t[0:-prev_n_step]
-
+      # alpha_ts === alpha(t) / alpha(s) for t > s >= 0
+      alpha_ts = alpha_t[reverse_stride:]/alpha_t[0:-reverse_stride]
     else:
       print("not supported diffusion scheduler, exit")
       return 
@@ -52,22 +77,33 @@ class DiffusionUtility:
     mu_coefs = np.sqrt(alpha_t) 
     var_coefs = 1 - alpha_t
     sigma_coefs = np.sqrt(var_coefs) # sqrt(1-alpha(t))
+    # define constant Tensors
     self.mu_coefs = tf.constant(mu_coefs, tf.float32)
     self.var_coefs = tf.constant(var_coefs, tf.float32)
     self.sigma_coefs = tf.constant(sigma_coefs, tf.float32)
     
     # for reverse sampling
-    reverse_var_coefs = (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:])*(1-alpha_ts)
+    var_coefs_st = var_coefs[0:-reverse_stride]/var_coefs[reverse_stride:]
+    reverse_var_coefs = var_coefs_st*(1-alpha_ts)
     assert np.all(reverse_var_coefs >= 0)
     reverse_sigma_coefs = np.sqrt(reverse_var_coefs)
-    reverse_mu_coefs_t= (var_coefs[0:-prev_n_step]/var_coefs[prev_n_step:])*(np.sqrt(alpha_ts))
-    reverse_mu_coefs_0 = mu_coefs[0:-prev_n_step] * (1-alpha_ts)/var_coefs[prev_n_step:]
-    reverse_sigma_coefs = np.insert(reverse_sigma_coefs, 0, [0.0]*prev_n_step)
-    reverse_mu_coefs_t = np.insert(reverse_mu_coefs_t, 0, [0.0]*prev_n_step)
-    reverse_mu_coefs_0 = np.insert(reverse_mu_coefs_0, 0, [1.0]*prev_n_step)
+
+    reverse_mu_ddpm_xt = var_coefs_st*np.sqrt(alpha_ts)
+    reverse_mu_ddpm_x0 = mu_coefs[0:-reverse_stride]*(1-alpha_ts)/var_coefs[reverse_stride:]
+    reverse_mu_ddim_x0 = mu_coefs[0:-reverse_stride]
+    reverse_mu_ddim_e = np.sqrt(var_coefs[0:-reverse_stride]-self.ddim_eta*reverse_var_coefs)
+    # insert 0 to make the total length = timesteps+1
+    reverse_sigma_coefs = np.insert(reverse_sigma_coefs, 0, [0.0]*reverse_stride)
+    reverse_mu_ddpm_xt = np.insert(reverse_mu_ddpm_xt, 0, [0.0]*reverse_stride)
+    reverse_mu_ddpm_x0 = np.insert(reverse_mu_ddpm_x0, 0, [1.0]*reverse_stride)
+    reverse_mu_ddim_x0 = np.insert(reverse_mu_ddim_x0, 0, [1.0]*reverse_stride)
+    reverse_mu_ddim_e = np.insert(reverse_mu_ddim_e, 0, [0.0]*reverse_stride)
+    # define constant Tensors
     self.reverse_sigma_coefs = tf.constant(reverse_sigma_coefs, tf.float32)
-    self.reverse_mu_coefs_t = tf.constant(reverse_mu_coefs_t, tf.float32)
-    self.reverse_mu_coefs_0 = tf.constant(reverse_mu_coefs_0, tf.float32)
+    self.reverse_mu_ddpm_xt = tf.constant(reverse_mu_ddpm_xt, tf.float32)
+    self.reverse_mu_ddpm_x0 = tf.constant(reverse_mu_ddpm_x0, tf.float32)
+    self.reverse_mu_ddim_x0 = tf.constant(reverse_mu_ddim_x0, tf.float32)
+    self.reverse_mu_ddim_e = tf.constant(reverse_mu_ddim_e, tf.float32)
 
   def q_sample(self, x_0, t, noise):
     """
@@ -87,23 +123,32 @@ class DiffusionUtility:
     """
     sigma_t = tf.gather(self.sigma_coefs, t)
     mu_t = tf.gather(self.mu_coefs, t)
-    x_0 = (x_t - sigma_t[:,None,None,None] * pred_noise) / (mu_t[:,None,None,None])
-    #print(x_0.numpy().max(), x_0.numpy().min())
-    if self.clip_denoise:
-      x_0 = tf.clip_by_value(x_0, self.CLIP_MIN, self.CLIP_MAX)
+    x_0 = (x_t - sigma_t[:,None,None,None] * pred_noise) / (self.eps+mu_t[:,None,None,None])
     return x_0
 
-  def q_reverse_mean_sigma(self, x_0, x_t, t):
+  def q_reverse_mean_sigma(self, x_0, x_t, t, pred_noise, method):
     """
       Compute the mean and variance of the diffusion posterior q(x_s | x_t, x_0).
       s = t-n, n>=1
       t: 1D integer index tensor: 1, 2, 3, ..., N
+      method = 'ddim' or 'ddpm'
     """
-    c_mu_t = tf.gather(self.reverse_mu_coefs_t, t)
-    c_mu_0 = tf.gather(self.reverse_mu_coefs_0, t)
-    mean_s = c_mu_0[:,None,None,None]*x_0 + c_mu_t[:,None,None,None] * x_t
-    sigma_s = tf.gather(self.reverse_sigma_coefs, t)
-    return (mean_s, sigma_s[:,None,None,None])
+    if method=='ddpm':
+      # DDPM reverse sampling formula
+      c_mu_t = tf.gather(self.reverse_mu_ddpm_xt, t)
+      c_mu_0 = tf.gather(self.reverse_mu_ddpm_x0, t)
+      _mean = c_mu_0[:,None,None,None]*x_0 + c_mu_t[:,None,None,None] * x_t
+      _sigma = tf.gather(self.reverse_sigma_coefs, t)
+    elif method=='ddim':
+      assert self.model_pred=='noise'
+      # DDIM reverse sampling formula
+      c_mu_ddim_0 = tf.gather(self.reverse_mu_ddim_x0, t)
+      c_mu_ddim_e = tf.gather(self.reverse_mu_ddim_e, t)
+      _mean = c_mu_ddim_0[:,None,None,None]*x_0 + c_mu_ddim_e[:,None,None,None]*pred_noise
+      _sigma = self.ddim_eta * tf.gather(self.reverse_sigma_coefs, t)
+    else:
+      _mean, _sigma = (None, None)
+    return (_mean, _sigma[:,None,None,None])
 
   def p_sample(self, pred_mean, pred_sigma):
     noise = tf.random.normal(shape=pred_mean.shape, dtype=tf.float32)
@@ -229,26 +274,30 @@ def TimeMLP(units, activation_fn=keras.activations.swish):
   return apply
 
 
-def build_model(image_size, image_channel, first_channel, widths, 
+def build_model(
+  image_size, 
+  image_channel, 
+  widths, 
   has_attention,
   #attn_resolutions=(16,),
   num_resnet_blocks=2, 
   norm_groups=8, 
   interpolation="nearest",
-  activation_fn=keras.activations.swish):
+  activation_fn=keras.activations.swish,
+  ):
   #
   input_shape = (image_size, image_size, image_channel)
   image_input = keras.Input(shape=input_shape, name="image_input")
   time_input = keras.Input(shape=(), dtype=tf.int64, name="time_input")
 
   x = keras.layers.Conv2D(
-    first_channel,
+    widths[0],
     kernel_size=(3, 3),
     padding="same",
     kernel_initializer=kernel_init(1.0))(image_input)
 
-  temb = TimeEmbedding(dim=first_channel * 4)(time_input)
-  temb = TimeMLP(units=first_channel * 4, activation_fn=activation_fn)(temb)
+  temb = TimeEmbedding(dim=widths[0] * 4)(time_input)
+  temb = TimeMLP(units=widths[0] * 4, activation_fn=activation_fn)(temb)
 
   skips = [x]
 
@@ -303,7 +352,7 @@ class DiffusionModel(keras.Model):
     self.ema = ema
     self.loss_tracker = keras.metrics.Mean(name="ema_loss")
     
-    assert self.diff_util.pred_type is not None
+    assert self.diff_util.model_pred is not None
 
   @property
   def metrics(self):
@@ -329,9 +378,9 @@ class DiffusionModel(keras.Model):
       y_pred = self.network([images_t, t], training=True)
 
       # 6. Calculate the loss
-      if self.diff_util.pred_type=="noise":
+      if self.diff_util.model_pred=="noise":
         loss = self.loss(noise, y_pred)
-      elif self.diff_util.pred_type=='x0':
+      elif self.diff_util.model_pred=='x0':
         loss = self.loss(images, y_pred)
       else:
         loss = None
@@ -357,49 +406,65 @@ class DiffusionModel(keras.Model):
     self.ema_network.save_weights(os.path.join(savedir, "ema_best.weights.h5"))
 
   def generate_images(self, epoch=None, logs=None, 
-    savedir='./', num_images=10, _freeze=False, 
-    given_samples=None, save_ini=False, export_interm=False):
+    savedir='./', num_images=10, _freeze=False, clip_denoise=False, 
+    gen_inputs=None, save_ini=False, export_interm=False,
+    ):
     #
     img_input, _ = self.network.inputs
     print("image input shape = {}".format(img_input.shape))
     _, img_size, _, img_channel = img_input.shape
 
-    if given_samples is not None:
-      samples = given_samples
-    else:
+    if gen_inputs is None:
       # 1. Randomly sample noise (starting point for reverse process) 
       samples = tf.random.normal(
         shape=(num_images, img_size, img_size, img_channel),
         dtype=tf.float32)
-    
+    else:
+      samples = gen_inputs
+
     ini_samples = tf.identity(samples)
-    tfzeros = tf.zeros_like(samples)
     n_imgs, _, _, _ = ini_samples.shape
     
     # 2. Sample from the model iteratively
     print("generating {} images ...".format(n_imgs))
-    # reverse time index:
-    # example: 
-    #   tf.range(100,  0, -1) =  [100,99,...,3,2,1]
-    #   tf.range(1000, 0, -10) = [1000,990,...,30,20,10]
-    reverse_timeindex = tf.range(self.timesteps, 0, -self.diff_util.prev_n_step)
+    """
+    reverse time index:
+    example 1: reverse sampling on every steps,
+      t = tf.range(1000, 0, -1) =  [1000, 999, 998, ..., 3, 2, 1]
+      xs = x_{t-1)
+      total = 1000 iterations
+    example 2: reverse sampling with stride 10
+      tf.range(1000, 0, -10) = [1000, 990, 980, ...,30,20,10]
+      xs = x_{t-10}
+      total = 100 iterations
+    """
+    reverse_timeindex = tf.range(self.timesteps, 0, -self.diff_util.reverse_stride)
     for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
       tt = tf.cast(tf.fill(tf.shape(samples)[0], t), dtype=tf.int64)
       # model prediction
       y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
       
-      if self.diff_util.pred_type == 'noise':
-        # y_pred is pred_noise
-        x0_recon = self.diff_util.x0_estimator(samples, tt, y_pred)
-      elif self.diff_util.pred_type == "x0":
-        # y_pred is pred_x0
+      if self.diff_util.model_pred == 'noise':
+        pred_noise = y_pred
+        x0_recon = self.diff_util.x0_estimator(samples, tt, pred_noise)
+      elif self.diff_util.model_pred == "x0":
+        pred_noise = None
         x0_recon = y_pred
       else:
         return
-      pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(x0_recon, samples, tt)
+      
+      if clip_denoise:
+        x0_recon = tf.clip_by_value(
+          x0_recon, self.diff_util.CLIP_MIN, self.diff_util.CLIP_MAX)
+      
+      pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(
+        x0_recon, samples, tt, pred_noise=pred_noise, 
+        method=self.diff_util.gen_method)
+      
       samples = self.diff_util.p_sample(pred_mean, pred_sigma)
-
+      
       if _freeze:
+        # TODO, not yet completed
         #samples = tf.stack([ini_samples[:,:,:,0], samples[:,:,:,1]], axis=-1)
         arr_0 = ini_samples.numpy()
         arr_i = samples.numpy()
@@ -407,14 +472,20 @@ class DiffusionModel(keras.Model):
         samples = tf.convert_to_tensor(arr_0, dtype=tf.float32)
 
       if export_interm and t.numpy()%10==0:
-        output_fn = os.path.join(savedir, "img_raw_t_"+str(t.numpy())+".npz")
+        output_fn = os.path.join(savedir, "img_t_"+str(t.numpy()))
+        if not clip_denoise:
+          output_fn = output_fn+"_raw"
         np.savez_compressed(output_fn, images=samples.numpy())
     
     # 3. Return generated samples
-    #samples = tf.clip_by_value(samples, -1, 1)
-    #samples = 0.5*(samples+1) ; # (-1, 1) -> (0, 1)
     ss = "x".join(list(map(str, samples.numpy().shape)))
-    output_fn = os.path.join(savedir, "gen_"+ss+"_raw.npz")
+    if self.diff_util.gen_method=='ddpm':
+      output_fn = "ddpm_gen_"+ss
+    else:
+      output_fn = "ddim_eta"+str(self.diff_util.ddim_eta)+"_gen_"+ss
+    if not clip_denoise:
+      output_fn = output_fn + "_raw"
+    output_fn = os.path.join(savedir, output_fn)
     d={}
     d['images']=samples.numpy()
     if save_ini:
@@ -434,13 +505,9 @@ if __name__=="__main__":
   samples = tf.random.normal(shape=(batch_size,1,1,1), dtype=tf.float32)
   for t in reversed(range(1, timesteps+1)):
     tt = tf.cast(tf.fill(batch_size, t), dtype=tf.int64)
-    mean_tt, sigma_tt = gdu.q_reverse_mean_sigma(x0, samples, tt)
+    mean_tt, sigma_tt = gdu.q_reverse_mean_sigma(
+      x0, samples, tt, pred_noise=None, gen_method='ddpm')
+
     print(t, np.squeeze(mean_tt.numpy()), np.squeeze(sigma_tt.numpy()))
     samples = gdu.p_sample(mean_tt, sigma_tt, tt)
-
-  print(arr)
-  print(gdu.reverse_mu_coefs_t)
-  print(gdu.reverse_mu_coefs_0)
-  print(gdu.reverse_sigma_coefs)
-
 
