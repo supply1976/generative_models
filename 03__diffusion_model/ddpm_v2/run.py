@@ -121,14 +121,23 @@ def main():
       print("Training dataset name not found, Please provide training dataset name.")
       print("Exit")
       return 
+    
     train_ds = None
-    dateID = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     input_shape = (input_image_size, input_image_size, input_image_channel)
-    nametag = "DDPM{}_{}x{}x{}".format(first_channel, *input_shape)
-    nametag = nametag + "__trset_{}".format(dataset_name)
-    tr_output_dir = os.path.join(os.path.abspath(training_output_dir), nametag)
+    # create folder for dataset tag
+    dataset_tag = os.path.join(
+      os.path.abspath(training_output_dir), 
+      "{}_{}x{}x{}".format(dataset_name, *input_shape)
+      )
+    if not os.path.isdir(dataset_tag): os.mkdir(dataset_tag)
+    # create model nametag
+    model_nametag = "unet"+str(first_channel)+"c"+"".join(map(str, channel_multiplier))
+    tr_output_dir = os.path.join(dataset_tag, model_nametag)
     if not os.path.isdir(tr_output_dir): os.mkdir(tr_output_dir)
+
+    dateID = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     dateID = "_".join([scheduler,str(timesteps),dateID])
+    
     if is_new_train:
       logging_dir = os.path.join(tr_output_dir, dateID)
       os.mkdir(logging_dir)
@@ -148,10 +157,12 @@ def main():
         #load_status.assert_consumed()
       logging_dir = os.path.join(restored_model_dir, "cont_tr_"+dateID)
       os.mkdir(logging_dir)
-      init_logging(os.path.join(logging_dir, "train.log"))
+      init_logging(os.path.join(logging_dir,"train.log"))
       logging.info("[INFO] Restoring model from: {}".format(trained_h5))
       logging.info("[INFO] Continuous training ...")
       shutil.copy(FLAGS.config, os.path.join(logging_dir, "training_config.yaml"))
+    # end of creating logging_dir 
+
     # Get the diffusion model (keras.Model)
     ddpm = modelDef.DiffusionModel(
       network=network, 
@@ -322,8 +333,8 @@ def main():
     ddpm.generate_images(
       num_images=num_gen_images, 
       savedir=gen_dir,
-      save_ini=True,
-      _freeze=True,
+      save_ini=False,
+      _freeze=False,
       gen_inputs=gen_inputs,
       export_interm=export_interm)
     deltaT = np.around((time.time()-t0)/3600, 4)
