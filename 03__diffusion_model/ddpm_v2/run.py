@@ -123,6 +123,7 @@ def main():
       return 
     
     train_ds = None
+    valid_ds = None
     input_shape = (input_image_size, input_image_size, input_image_channel)
     # create folder for dataset tag
     dataset_tag = os.path.join(
@@ -131,7 +132,8 @@ def main():
       )
     if not os.path.isdir(dataset_tag): os.mkdir(dataset_tag)
     # create model nametag
-    model_nametag = "unet"+str(first_channel)+"c"+"".join(map(str, channel_multiplier))
+    model_nametag = "unet"+str(first_channel)+"cm"+"".join(map(str, channel_multiplier))
+    model_nametag = model_nametag+"gn"+str(norm_groups)
     tr_output_dir = os.path.join(dataset_tag, model_nametag)
     if not os.path.isdir(tr_output_dir): os.mkdir(tr_output_dir)
 
@@ -168,32 +170,26 @@ def main():
       network=network, 
       ema_network=ema_network,
       diff_util=diff_util_train,
-      timesteps=timesteps)
+      timesteps=timesteps,
+      )
     
     logging.info("[INFO] Training Start Time: {}".format(datetime.datetime.now()))
     t0 = time.time()
-    if dataset_name in ["cifar10", "mnist"]:
-      # use internal keras dataset for quick testing
+    if dataset_name == "cifar10":
+      # use internal keras cifar10 dataset for quick testing
       # ignore dataset_path when use these two dataset_name
       logging.info("[INFO] use internal keras dataset {} ".format(dataset_name))
-      if dataset_name == "cifar10":
-        (train_images, train_labels), _ = keras.datasets.cifar10.load_data()
-        #ID, _ = np.where(train_labels==1)
-        #train_images = train_images[ID]
+      (train_images, _), (valid_images, _) = keras.datasets.cifar10.load_data()
 
-      elif dataset_name == "mnist": 
-        (train_images, _), _ = keras.datasets.mnist.load_data()
-        train_images = np.expand_dims(train_images, axis=-1)
-
-      else:
-        train_images = None
       train_images = train_images.astype(np.float32)
       train_images = 2*(train_images / 255.0) - 1 ; # rescale to (-1, 1)
-      if dataset_name=="mnist":
-        train_images = tf.image.resize(train_images, [32, 32])
+      valid_images = valid_images.astype(np.float32)
+      valid_images = 2*(valid_images / 255.0) - 1 ; # rescale to (-1, 1)
       train_ds = tf.data.Dataset.from_tensor_slices(train_images)
       train_ds = train_ds.cache()
       train_ds = train_ds.shuffle(train_ds.cardinality())
+      valid_ds = tf.data.Dataset.from_tensor_slices(valid_images)
+      valid_ds = valid_ds.cache()
 
     else:
       # for other dataset_name, check the dataset_path
@@ -205,14 +201,22 @@ def main():
         if os.path.isdir(dataset_path):
           logging.info("[INFO] use a folder contains multiple npz files for training")
           logging.info("[INFO] dataset path: {}".format(dataset_path))
-          dataloader = DataLoader(data_dir=dataset_path, crop_size=clip_size)
-          train_ds = dataloader.load_dataset()
+          dataloader = DataLoader(
+            data_dir=dataset_path, 
+            crop_size=clip_size,
+            valid_ratio=0.2)
+          train_ds, valid_ds = dataloader.load_dataset()
         elif os.path.isfile(dataset_path):
           logging.info("use single (big) npz file for trainingg")
           data = np.load(dataset_path)
-          train_images = data['images']
-          train_ds = tf.data.Dataset.from_tensor_slices(train_images)
+          all_images = data['images']
+          idx = np.arange(len(all_images))
+          np.random.shuffle(idx)
+          num_val = int(0.2*len(all_images))
+          train_ds = tf.data.Dataset.from_tensor_slices(all_images[num_val:])
+          valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val])
           train_ds = train_ds.cache()
+          valid_ds = valid_ds.cache()
           train_ds = train_ds.shuffle(train_ds.cardinality())
         else:
           return
@@ -220,6 +224,10 @@ def main():
     assert train_ds is not None
     train_ds = train_ds.batch(batch_size, drop_remainder=True)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    if valid_ds is not None:
+      valid_ds = valid_ds.batch(batch_size)
+      valid_ds = valid_ds.prefetch(tf.data.AUTOTUNE)
+      
     # get input image shape (preprocessed)
     for x in train_ds.take(1):
       _, h, w, c = x.shape
@@ -228,7 +236,7 @@ def main():
     assert c==input_image_channel
     assert h==input_image_size
     
-    callback_save_model = keras.callbacks.LambdaCallback(
+    callback_save_ema_latest = keras.callbacks.LambdaCallback(
       on_epoch_end=lambda epoch,logs: ddpm.save_model(epoch, savedir=logging_dir))
     callback_genimages = keras.callbacks.LambdaCallback(
       on_train_end=ddpm.generate_images)
@@ -239,7 +247,19 @@ def main():
     logging.info("[INFO] Total Epochs: {}".format(epochs))
 
     csv_logger = CSVLogger(os.path.join(logging_dir, "log.csv"), append=True, separator=",")
-    callback_list = [csv_logger, callback_save_model, callback_genimages]
+    best_ckpt_path = os.path.join(logging_dir, "dm_best.weights.h5")
+    callback_save_ema_best = keras.callbacks.ModelCheckpoint(
+      filepath=best_ckpt_path,
+      save_weights_only=True,
+      monitor='val_loss',
+      mode='min',
+      save_best_only=True,
+      )
+    callback_list = [
+      csv_logger, 
+      callback_save_ema_latest,
+      callback_save_ema_best,
+      callback_genimages]
 
     # Compile the model
     ddpm.compile(
@@ -249,10 +269,10 @@ def main():
     # Train the model
     ddpm.fit(
       train_ds,
+      validation_data=valid_ds,
       epochs=epochs,
       callbacks=callback_list
       )
-    #ema_network.save_weights(os.path.join(logging_dir, "ema_final.weights.h5"))
     deltaT = np.around((time.time() - t0)/3600.0, 4)
     nowT = datetime.datetime.now()
     logging.info("[INFO] Training End: {}, elapsed time: {} hours".format(nowT, deltaT))
@@ -263,14 +283,18 @@ def main():
     model_dir = os.path.dirname(imgen_model_path)
     gen_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    load_status = ema_network.load_weights(imgen_model_path)
-    network.set_weights(ema_network.get_weights())
     ddpm = modelDef.DiffusionModel(
       network=network, 
       ema_network=ema_network,
       diff_util=diff_util_infer,
-      timesteps=timesteps)
-    
+      timesteps=timesteps,
+      )
+    try:
+      ddpm.load_weights(imgen_model_path)
+    except:
+      ddpm.ema_network.load_weights(imgen_model_path)
+      ddpm.network.set_weights(ddpm.ema_network.get_weights())
+
     if gen_output_dir is None: 
       gen_steps = str(diff_util_infer.timesteps // diff_util_infer.reverse_stride)+"steps"
       gen_dir = "_".join(["imgen",diff_util_infer.gen_method,gen_steps,gen_date])

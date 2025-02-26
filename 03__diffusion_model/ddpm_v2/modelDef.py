@@ -117,13 +117,15 @@ class DiffusionUtility:
     x_t = mu_t[:,None,None,None]*x_0 + sigma_t[:,None,None,None] * noise
     return x_t
   
-  def x0_estimator(self, x_t, t, pred_noise):
+  def x0_estimator(self, x_t, t, pred_noise, clip_denoise=True):
     """
       Reconstruct x0 by pred_noise, this is original DDPM method
     """
     sigma_t = tf.gather(self.sigma_coefs, t)
     mu_t = tf.gather(self.mu_coefs, t)
     x_0 = (x_t - sigma_t[:,None,None,None] * pred_noise) / (self.eps+mu_t[:,None,None,None])
+    if clip_denoise:
+      x_0 = tf.clip_by_value(x_0, self.CLIP_MIN, self.CLIP_MAX)
     return x_0
 
   def q_reverse_mean_sigma(self, x_0, x_t, t, pred_noise, method):
@@ -218,7 +220,7 @@ class TimeEmbedding(keras.layers.Layer):
     return emb
 
 
-def ResidualBlock(width, groups=8, activation_fn=keras.activations.swish):
+def ResidualBlock(width, groups=32, activation_fn=keras.activations.swish):
   def apply(inputs):
     x, t = inputs
     input_width = x.shape[3]
@@ -350,13 +352,14 @@ class DiffusionModel(keras.Model):
     self.timesteps = timesteps
     self.diff_util = diff_util
     self.ema = ema
-    self.loss_tracker = keras.metrics.Mean(name="ema_loss")
+    self.noise_loss_tracker = keras.metrics.Mean(name="loss")
+    self.image_loss_tracker = keras.metrics.Mean(name="x0recon_loss")
     
     assert self.diff_util.model_pred is not None
 
   @property
   def metrics(self):
-    return [self.loss_tracker]
+    return [self.noise_loss_tracker, self.image_loss_tracker]
 
   def train_step(self, images):
     # 1. Get the batch size
@@ -375,35 +378,61 @@ class DiffusionModel(keras.Model):
       images_t = self.diff_util.q_sample(images, t, noise)
 
       # 5. Pass the diffused images and time steps to the network
-      y_pred = self.network([images_t, t], training=True)
-
-      # 6. Calculate the loss
-      if self.diff_util.model_pred=="noise":
-        loss = self.loss(noise, y_pred)
-      elif self.diff_util.model_pred=='x0':
-        loss = self.loss(images, y_pred)
+      if self.diff_util.model_pred=='noise':
+        pred_noise = self.network([images_t, t], training=True)
+        pred_start = self.diff_util.x0_estimator(images_t, t, pred_noise)
+      elif self.diff_util.model_pred=='start':
+        raise NotImplementedError
       else:
-        loss = None
+        pred_start = None
+        pred_noise = None
+
+      noise_loss = self.loss(noise, pred_noise)
+      image_loss = self.loss(images, pred_start)
 
     # 7. Get the gradients
-    gradients = tape.gradient(loss, self.network.trainable_weights)
+    gradients = tape.gradient(noise_loss, self.network.trainable_weights)
 
     # 8. Update the weights of the network
     self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
-    self.loss_tracker.update_state(loss)
+    self.noise_loss_tracker.update_state(noise_loss)
+    self.image_loss_tracker.update_state(image_loss)
 
     # 9. Updates the weight values for the network with EMA weights
     for weight, ema_weight in zip(self.network.weights, self.ema_network.weights):
       ema_weight.assign(self.ema * ema_weight + (1 - self.ema) * weight)
 
     # 10. Return loss values
-    return {"loss": self.loss_tracker.result()}
+    return {m.name: m.result() for m in self.metrics}
+
+  def test_step(self, images):
+    # using ema_network to evaluate
+    batch_size = tf.shape(images)[0]
+    t = tf.random.uniform(minval=1, maxval=self.timesteps+1, 
+      shape=(batch_size,), dtype=tf.int64)
+    noise = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
+    images_t = self.diff_util.q_sample(images, t, noise)
+    if self.diff_util.model_pred=='noise':
+      pred_noise = self.ema_network([images_t, t], training=False)
+      pred_start = self.diff_util.x0_estimator(images_t, t, pred_noise)
+    elif self.diff_util.model_pred=='start':
+      raise NotImplementedError
+    else:
+      pred_start = None
+      pred_noise = None
+
+    noise_loss = self.loss(noise, pred_noise)
+    image_loss = self.loss(images, pred_start)
+    self.noise_loss_tracker.update_state(noise_loss)
+    self.image_loss_tracker.update_state(image_loss)
+
+    return {m.name: m.result() for m in self.metrics}
 
   def save_model(self, epoch, logs=None, savedir=None):
     epo = str(epoch).zfill(5)
-    if epoch%1000==0:
-      self.ema_network.save_weights(os.path.join(savedir, f"ema_epoch_{epo}.weights.h5"))
-    self.ema_network.save_weights(os.path.join(savedir, "ema_best.weights.h5"))
+    #if epoch%100==0:
+    #  self.ema_network.save_weights(os.path.join(savedir, f"ema_epoch_{epo}.weights.h5"))
+    self.ema_network.save_weights(os.path.join(savedir, "ema_latest.weights.h5"))
 
   def generate_images(self, epoch=None, logs=None, 
     savedir='./', num_images=10, _freeze=False, clip_denoise=False, 
@@ -442,20 +471,14 @@ class DiffusionModel(keras.Model):
     for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
       tt = tf.cast(tf.fill(tf.shape(samples)[0], t), dtype=tf.int64)
       # model prediction
-      y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
-      
       if self.diff_util.model_pred == 'noise':
-        pred_noise = y_pred
-        x0_recon = self.diff_util.x0_estimator(samples, tt, pred_noise)
-      elif self.diff_util.model_pred == "x0":
-        pred_noise = None
-        x0_recon = y_pred
+        pred_noise = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
+        x0_recon = self.diff_util.x0_estimator(samples, tt, pred_noise, 
+          clip_denoise=clip_denoise)
+      elif self.diff_util.model_pred == "start":
+        raise NotImplementedError
       else:
         return
-      
-      if clip_denoise:
-        x0_recon = tf.clip_by_value(
-          x0_recon, self.diff_util.CLIP_MIN, self.diff_util.CLIP_MAX)
       
       pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(
         x0_recon, samples, tt, pred_noise=pred_noise, 
