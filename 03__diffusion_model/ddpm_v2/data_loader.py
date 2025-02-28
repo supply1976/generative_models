@@ -10,8 +10,13 @@ from tensorflow import keras
 
 
 class DataLoader:
-  def __init__(self, data_dir, 
-    valid_ratio=None, crop_size=None, npz_key='image', file_format='.npz'):
+  def __init__(self, 
+    data_dir, 
+    crop_size=None, 
+    npz_key='image', 
+    file_format='.npz',
+    dataset_repeat=1,
+    ):
     """
     search the numpy (.npz) files in the fiven data_dir
     load numpy data, 
@@ -31,24 +36,14 @@ class DataLoader:
           self.npzfiles.append(file_path)
     assert len(self.npzfiles) > 0
 
-    if valid_ratio is not None:
-      idx = np.arange(len(self.npzfiles))
-      np.random.shuffle(idx)
-      num_val = int(valid_ratio*len(self.npzfiles))
-      if num_val <1:
-        num_val = 1
-      self.valid_npzfiles = self.npzfiles[0:num_val]
-      self.train_npzfiles = self.npzfiles[num_val:]
-    else:
-      self.train_npzfiles = self.npzfiles
-      self.valid_npzfiles = None
-      
+    idx = np.arange(len(self.npzfiles))
+    np.random.shuffle(idx)
+    num_val = int(0.1*len(self.npzfiles))
+    self.valid_npzfiles = self.npzfiles[0:num_val]
   
   def load_dataset(self):
-    train_ds = tf.data.Dataset.from_tensor_slices(self.train_npzfiles)
-    valid_ds = None
-    if self.valid_npzfiles is not None:
-      valid_ds = tf.data.Dataset.from_tensor_slices(self.valid_npzfiles)
+    train_ds = tf.data.Dataset.from_tensor_slices(self.npzfiles)
+    valid_ds = tf.data.Dataset.from_tensor_slices(self.valid_npzfiles)
 
     def _preprocess(x):
       raw_name = x.numpy().decode()
@@ -69,17 +64,16 @@ class DataLoader:
       img = (img) *(CLIP_MAX-CLIP_MIN) + CLIP_MIN
       return img
 
-    train_ds = train_ds.cache()
+    train_ds = train_ds.cache().repeat(dataset_repeat)
     train_ds = train_ds.shuffle(train_ds.cardinality())
     train_ds = train_ds.map(
       lambda x: tf.py_function(_preprocess, [x], tf.float32),
       num_parallel_calls=tf.data.AUTOTUNE)
     # valid ds  
-    if valid_ds is not None:
-      valid_ds = valid_ds.cache()
-      valid_ds = valid_ds.map(
-        lambda x: tf.py_function(_preprocess, [x], tf.float32),
-        num_parallel_calls=tf.data.AUTOTUNE)
+    valid_ds = valid_ds.cache().repeat(dataset_repeat)
+    valid_ds = valid_ds.map(
+      lambda x: tf.py_function(_preprocess, [x], tf.float32),
+      num_parallel_calls=tf.data.AUTOTUNE)
 
     return (train_ds, valid_ds)
 

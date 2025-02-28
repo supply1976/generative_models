@@ -37,11 +37,14 @@ def main():
   imgen_dict     = config_dict['IMAGE_GENERATION']
 
   # dataset
-  dataset_name = dataset_dict['NAME']
-  dataset_path = dataset_dict['PATH']
+  dataset_name   = dataset_dict['NAME']
+  dataset_path   = dataset_dict['PATH']
+  if 'REPEAT' not in dataset_dict.keys(): dataset_dict['REPEAT'] = 1
+  dataset_repeat = dataset_dict['REPEAT']
   clip_size = dataset_dict['PREPROCESSING']['CLIP_SIZE']
   CLIP_MIN  = dataset_dict['PREPROCESSING']['CLIP_MIN']
   CLIP_MAX  = dataset_dict['PREPROCESSING']['CLIP_MAX']
+
   # input shape
   input_image_size    = training_dict['INPUT_IMAGE_SIZE']
   input_image_channel = training_dict['INPUT_IMAGE_CHANNEL']
@@ -51,6 +54,7 @@ def main():
   is_new_train       = training_dict['IS_NEW_TRAIN']
   trained_h5         = training_dict['TRAINED_H5']
   model_pred         = training_dict['MODEL_PRED']
+  loss_fn            = training_dict['LOSS_FN']
   # network
   scheduler          = training_dict['NETWORK']['SCHEDULER']
   timesteps          = training_dict['NETWORK']['TIMESTEPS']
@@ -75,6 +79,7 @@ def main():
   gen_output_dir   = imgen_dict['GEN_OUTPUT_DIR']
   ddim_eta         = imgen_dict['DDIM_ETA']
   random_seed      = imgen_dict['RANDOM_SEED']
+
 
   # GPU devices
   gpus = tf.config.list_physical_devices("GPU")
@@ -178,7 +183,7 @@ def main():
     if dataset_name == "cifar10":
       # use internal keras cifar10 dataset for quick testing
       # ignore dataset_path when use these two dataset_name
-      logging.info("[INFO] use internal keras dataset {} ".format(dataset_name))
+      logging.info("[INFO] Use internal keras dataset {} ".format(dataset_name))
       (train_images, _), (valid_images, _) = keras.datasets.cifar10.load_data()
 
       train_images = train_images.astype(np.float32)
@@ -197,14 +202,15 @@ def main():
         logging.error("Please provide dataset path, Exit")
         return
       else:
-        logging.info("[INFO] user defined dataset name:{}".format(dataset_name))
+        logging.info("[INFO] User defined dataset name:{}".format(dataset_name))
         if os.path.isdir(dataset_path):
-          logging.info("[INFO] use a folder contains multiple npz files for training")
-          logging.info("[INFO] dataset path: {}".format(dataset_path))
+          logging.info("[INFO] Use a folder contains multiple npz files for training")
+          logging.info("[INFO] Dataset path: {}".format(dataset_path))
           dataloader = DataLoader(
             data_dir=dataset_path, 
             crop_size=clip_size,
-            valid_ratio=0.2)
+            dataset_repeat=dataset_repeat,
+            )
           train_ds, valid_ds = dataloader.load_dataset()
         elif os.path.isfile(dataset_path):
           logging.info("use single (big) npz file for trainingg")
@@ -212,11 +218,11 @@ def main():
           all_images = data['images']
           idx = np.arange(len(all_images))
           np.random.shuffle(idx)
-          num_val = int(0.2*len(all_images))
-          train_ds = tf.data.Dataset.from_tensor_slices(all_images[num_val:])
+          num_val = int(0.1*len(all_images))
+          train_ds = tf.data.Dataset.from_tensor_slices(all_images)
           valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val])
-          train_ds = train_ds.cache()
-          valid_ds = valid_ds.cache()
+          train_ds = train_ds.cache().repeat(dataset_repeat)
+          valid_ds = valid_ds.cache().repeat(dataset_repeat)
           train_ds = train_ds.shuffle(train_ds.cardinality())
         else:
           return
@@ -224,9 +230,8 @@ def main():
     assert train_ds is not None
     train_ds = train_ds.batch(batch_size, drop_remainder=True)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-    if valid_ds is not None:
-      valid_ds = valid_ds.batch(batch_size)
-      valid_ds = valid_ds.prefetch(tf.data.AUTOTUNE)
+    valid_ds = valid_ds.batch(batch_size)
+    valid_ds = valid_ds.prefetch(tf.data.AUTOTUNE)
       
     # get input image shape (preprocessed)
     for x in train_ds.take(1):
@@ -244,6 +249,8 @@ def main():
     logging.info("[INFO] Forward Training Steps: {}".format(timesteps))
     logging.info("[INFO] Scheduler: {} ".format(scheduler))
     logging.info("[INFO] Learning Rate: {}".format(learning_rate))
+    logging.info("[INFO] Loss Function: {}".format(loss_fn))
+
     logging.info("[INFO] Total Epochs: {}".format(epochs))
 
     csv_logger = CSVLogger(os.path.join(logging_dir, "log.csv"), append=True, separator=",")
@@ -261,10 +268,20 @@ def main():
       callback_save_ema_best,
       callback_genimages]
 
+    if loss_fn == "MAE":
+      loss_fn = keras.losses.MeanAbsoluteError()
+    elif loss_fn == 'MSE':
+      loss_fn = keras.losses.MeanSquaredError()
+    else:
+      raise NotImplementedError
     # Compile the model
     ddpm.compile(
-      loss=keras.losses.MeanSquaredError(),
-      optimizer=keras.optimizers.Adam(learning_rate=learning_rate))
+      loss=loss_fn,
+      optimizer=keras.optimizers.Adam(
+        learning_rate=learning_rate,
+        #weight_decay=1.0e-5,
+        )
+    )
 
     # Train the model
     ddpm.fit(
@@ -349,6 +366,9 @@ def main():
         tf.random.set_seed(seed)
         zlist.append(tf.random.normal(shape=_shape, dtype=tf.float32))
       gen_inputs = tf.concat(zlist, axis=0)
+    
+    elif gen_inputs == "custom2":
+      pass
 
     else:
       return

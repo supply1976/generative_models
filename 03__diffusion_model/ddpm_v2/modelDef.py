@@ -233,17 +233,21 @@ def ResidualBlock(width, groups=32, activation_fn=keras.activations.swish):
 
     temb = activation_fn(t)
     temb = keras.layers.Dense(
-      width, kernel_initializer=kernel_init(1.0))(temb)[:, None, None, :]
+      width, 
+      kernel_initializer=kernel_init(1.0),
+      )(temb)[:, None, None, :]
 
     x = keras.layers.GroupNormalization(groups=groups)(x)
     x = activation_fn(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      kernel_initializer=kernel_init(1.0))(x)
+      kernel_initializer=kernel_init(1.0),
+      )(x)
     x = keras.layers.Add()([x, temb])
     x = keras.layers.GroupNormalization(groups=groups)(x)
     x = activation_fn(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      kernel_initializer=kernel_init(0.0))(x)
+      kernel_initializer=kernel_init(0.0),
+      )(x)
     x = keras.layers.Add()([x, residual])
     return x
   return apply
@@ -252,7 +256,9 @@ def ResidualBlock(width, groups=32, activation_fn=keras.activations.swish):
 def DownSample(width):
   def apply(x):
     x = keras.layers.Conv2D(width, kernel_size=3, strides=2, 
-      padding="same", kernel_initializer=kernel_init(1.0))(x)
+      padding="same", 
+      kernel_initializer=kernel_init(1.0),
+      )(x)
     return x
   return apply
 
@@ -261,7 +267,8 @@ def UpSample(width, interpolation="nearest"):
   def apply(x):
     x = keras.layers.UpSampling2D(size=2, interpolation=interpolation)(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      kernel_initializer=kernel_init(1.0))(x)
+      kernel_initializer=kernel_init(1.0),
+      )(x)
     return x
   return apply
 
@@ -269,9 +276,12 @@ def UpSample(width, interpolation="nearest"):
 def TimeMLP(units, activation_fn=keras.activations.swish):
   def apply(inputs):
     temb = keras.layers.Dense(units, activation=activation_fn, 
-      kernel_initializer=kernel_init(1.0))(inputs)
+      kernel_initializer=kernel_init(1.0),
+      )(inputs)
     temb = keras.layers.Dense(
-      units, kernel_initializer=kernel_init(1.0))(temb)
+      units, 
+      kernel_initializer=kernel_init(1.0),
+      )(temb)
     return temb
   return apply
 
@@ -296,7 +306,8 @@ def build_model(
     widths[0],
     kernel_size=(3, 3),
     padding="same",
-    kernel_initializer=kernel_init(1.0))(image_input)
+    kernel_initializer=kernel_init(1.0),
+    )(image_input)
 
   temb = TimeEmbedding(dim=widths[0] * 4)(time_input)
   temb = TimeMLP(units=widths[0] * 4, activation_fn=activation_fn)(temb)
@@ -340,7 +351,8 @@ def build_model(
   x = keras.layers.GroupNormalization(groups=norm_groups)(x)
   x = activation_fn(x)
   x = keras.layers.Conv2D(image_channel, (3, 3), padding="same", 
-    kernel_initializer=kernel_init(0.0))(x)
+    kernel_initializer=kernel_init(0.0),
+    )(x)
   return keras.Model([image_input, time_input], x, name="unet")
 
 
@@ -352,14 +364,14 @@ class DiffusionModel(keras.Model):
     self.timesteps = timesteps
     self.diff_util = diff_util
     self.ema = ema
-    self.noise_loss_tracker = keras.metrics.Mean(name="loss")
-    self.image_loss_tracker = keras.metrics.Mean(name="x0recon_loss")
+    self.loss_tracker = keras.metrics.Mean(name="loss")
+    self.image_loss_tracker = keras.metrics.Mean(name="image_loss")
     
     assert self.diff_util.model_pred is not None
 
   @property
   def metrics(self):
-    return [self.noise_loss_tracker, self.image_loss_tracker]
+    return [self.loss_tracker, self.image_loss_tracker]
 
   def train_step(self, images):
     # 1. Get the batch size
@@ -395,7 +407,7 @@ class DiffusionModel(keras.Model):
 
     # 8. Update the weights of the network
     self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
-    self.noise_loss_tracker.update_state(noise_loss)
+    self.loss_tracker.update_state(noise_loss)
     self.image_loss_tracker.update_state(image_loss)
 
     # 9. Updates the weight values for the network with EMA weights
@@ -423,7 +435,7 @@ class DiffusionModel(keras.Model):
 
     noise_loss = self.loss(noise, pred_noise)
     image_loss = self.loss(images, pred_start)
-    self.noise_loss_tracker.update_state(noise_loss)
+    self.loss_tracker.update_state(noise_loss)
     self.image_loss_tracker.update_state(image_loss)
 
     return {m.name: m.result() for m in self.metrics}
