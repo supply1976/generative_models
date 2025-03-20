@@ -39,7 +39,8 @@ def main():
   # dataset
   dataset_name   = dataset_dict['NAME']
   dataset_path   = dataset_dict['PATH']
-  if 'REPEAT' not in dataset_dict.keys(): dataset_dict['REPEAT'] = 1
+  if 'REPEAT' not in dataset_dict.keys(): 
+    dataset_dict['REPEAT'] = 1
   dataset_repeat = dataset_dict['REPEAT']
   clip_size = dataset_dict['PREPROCESSING']['CLIP_SIZE']
   CLIP_MIN  = dataset_dict['PREPROCESSING']['CLIP_MIN']
@@ -53,12 +54,13 @@ def main():
   if not os.path.isdir(training_output_dir): os.mkdir(training_output_dir)
   is_new_train       = training_dict['IS_NEW_TRAIN']
   trained_h5         = training_dict['TRAINED_H5']
-  model_pred         = training_dict['MODEL_PRED']
+  pred_type          = training_dict['PRED_TYPE']
   loss_fn            = training_dict['LOSS_FN']
   # network
   scheduler          = training_dict['NETWORK']['SCHEDULER']
   timesteps          = training_dict['NETWORK']['TIMESTEPS']
   num_resnet_blocks  = training_dict['NETWORK']['NUM_RESNET_BLOCKS']
+  block_size         = training_dict['NETWORK']['BLOCK_SIZE']
   norm_groups        = training_dict['NETWORK']['NORM_GROUPS']
   first_channel      = training_dict['NETWORK']['FIRST_CHANNEL']
   channel_multiplier = training_dict['NETWORK']['CHANNEL_MULTIPLIER']
@@ -75,7 +77,6 @@ def main():
   export_interm    = imgen_dict['EXPORT_INTERM']
   reverse_stride   = imgen_dict['REVERSE_STRIDE']
   gen_inputs       = imgen_dict['GEN_INPUTS']
-  gen_method       = imgen_dict['GEN_METHOD']
   gen_output_dir   = imgen_dict['GEN_OUTPUT_DIR']
   ddim_eta         = imgen_dict['DDIM_ETA']
   random_seed      = imgen_dict['RANDOM_SEED']
@@ -93,7 +94,9 @@ def main():
     has_attention = has_attention,
     num_resnet_blocks = num_resnet_blocks,
     norm_groups = norm_groups,
-    activation_fn = keras.activations.swish)
+    activation_fn = keras.activations.swish,
+    block_size = block_size,
+    )
   
   ema_network = modelDef.build_model(
     image_size    = input_image_size, 
@@ -102,7 +105,9 @@ def main():
     has_attention = has_attention,
     num_resnet_blocks = num_resnet_blocks,
     norm_groups = norm_groups,
-    activation_fn = keras.activations.swish)
+    activation_fn = keras.activations.swish,
+    block_size = block_size,
+    )
 
   network.summary()
   # Initially the weights are the same
@@ -112,16 +117,24 @@ def main():
   # util for training
   diff_util_train = modelDef.DiffusionUtility(
     b0=0.1, b1=20, timesteps=timesteps, 
-    scheduler=scheduler, model_pred=model_pred, reverse_stride=1
+    scheduler=scheduler, pred_type=pred_type, reverse_stride=1
     )
   # util for inference
   diff_util_infer = modelDef.DiffusionUtility(
     b0=0.1, b1=20, timesteps=timesteps, 
-    scheduler=scheduler, model_pred=model_pred, reverse_stride=reverse_stride,
-    gen_method=gen_method, ddim_eta=ddim_eta,
+    scheduler=scheduler, pred_type=pred_type, reverse_stride=reverse_stride,
+    ddim_eta=ddim_eta,
     )
    
   if FLAGS.training: 
+    # Get the diffusion model (keras.Model)
+    ddpm = modelDef.DiffusionModel(
+      network=network, 
+      ema_network=ema_network,
+      diff_util=diff_util_train,
+      timesteps=timesteps,
+      )
+    
     if dataset_name is None:
       print("Training dataset name not found, Please provide training dataset name.")
       print("Exit")
@@ -139,11 +152,12 @@ def main():
     # create model nametag
     model_nametag = "unet"+str(first_channel)+"cm"+"".join(map(str, channel_multiplier))
     model_nametag = model_nametag+"gn"+str(norm_groups)
+    model_nametag = model_nametag+"bs"+str(block_size)
     tr_output_dir = os.path.join(dataset_tag, model_nametag)
     if not os.path.isdir(tr_output_dir): os.mkdir(tr_output_dir)
 
     dateID = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    dateID = "_".join([scheduler,str(timesteps),dateID])
+    dateID = "_".join([scheduler,str(timesteps),pred_type, loss_fn, dateID])
     
     if is_new_train:
       logging_dir = os.path.join(tr_output_dir, dateID)
@@ -159,25 +173,20 @@ def main():
         # load .h5 file
         trained_h5 = os.path.abspath(trained_h5)
         restored_model_dir = os.path.dirname(trained_h5)
-        load_status = ema_network.load_weights(trained_h5)
-        network.set_weights(ema_network.get_weights())
-        #load_status.assert_consumed()
-      logging_dir = os.path.join(restored_model_dir, "cont_tr_"+dateID)
+        try:
+          ddpm.load_weights(trained_h5)
+        except:
+          ddpm.ema_network.load_weights(trained_h5)
+          ddpm.network.set_weights(ddpm.ema_network.get_weights())
+
+      logging_dir = os.path.join(restored_model_dir, "transfer_"+dateID)
       os.mkdir(logging_dir)
       init_logging(os.path.join(logging_dir,"train.log"))
       logging.info("[INFO] Restoring model from: {}".format(trained_h5))
-      logging.info("[INFO] Continuous training ...")
+      logging.info("[INFO] Continuous Transfer training ...")
       shutil.copy(FLAGS.config, os.path.join(logging_dir, "training_config.yaml"))
     # end of creating logging_dir 
 
-    # Get the diffusion model (keras.Model)
-    ddpm = modelDef.DiffusionModel(
-      network=network, 
-      ema_network=ema_network,
-      diff_util=diff_util_train,
-      timesteps=timesteps,
-      )
-    
     logging.info("[INFO] Training Start Time: {}".format(datetime.datetime.now()))
     t0 = time.time()
     if dataset_name == "cifar10":
@@ -216,6 +225,7 @@ def main():
           logging.info("use single (big) npz file for trainingg")
           data = np.load(dataset_path)
           all_images = data['images']
+          all_images = 2*(all_images) - 1.0
           idx = np.arange(len(all_images))
           np.random.shuffle(idx)
           num_val = int(0.1*len(all_images))
@@ -249,6 +259,7 @@ def main():
     logging.info("[INFO] Forward Training Steps: {}".format(timesteps))
     logging.info("[INFO] Scheduler: {} ".format(scheduler))
     logging.info("[INFO] Learning Rate: {}".format(learning_rate))
+    logging.info("[INFO] Predict Type: {}".format(pred_type))
     logging.info("[INFO] Loss Function: {}".format(loss_fn))
 
     logging.info("[INFO] Total Epochs: {}".format(epochs))
@@ -309,12 +320,13 @@ def main():
     try:
       ddpm.load_weights(imgen_model_path)
     except:
+      print("here")
       ddpm.ema_network.load_weights(imgen_model_path)
       ddpm.network.set_weights(ddpm.ema_network.get_weights())
 
     if gen_output_dir is None: 
       gen_steps = str(diff_util_infer.timesteps // diff_util_infer.reverse_stride)+"steps"
-      gen_dir = "_".join(["imgen",diff_util_infer.gen_method,gen_steps,gen_date])
+      gen_dir = "_".join(["imgen",gen_steps,gen_date])
       gen_dir = os.path.join(model_dir, gen_dir)
       os.mkdir(gen_dir)
     else:
@@ -323,12 +335,8 @@ def main():
     
     init_logging(os.path.join(gen_dir, "imgen.log"))
     logging.info("[IMGEN] Start to generate images using model: {}".format(imgen_model_path))
-    logging.info("[IMGEN] model output: {}".format(diff_util_infer.model_pred))
-    logging.info("[IMGEN] use {} reverse sampling formula".format(
-      diff_util_infer.gen_method.upper()))
-    if diff_util_infer.gen_method=='ddim':
-      logging.info("[IMGEN] DDIM eta = {}".format(diff_util_infer.ddim_eta))
-
+    logging.info("[IMGEN] model predict type: {}".format(diff_util_infer.pred_type))
+    logging.info("[IMGEN] DDIM eta = {}".format(diff_util_infer.ddim_eta))
     logging.info("[IMGEN] set random seed: {}".format(random_seed))
     tf.random.set_seed(random_seed)
 

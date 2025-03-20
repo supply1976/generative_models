@@ -8,8 +8,8 @@ import tqdm
 
 class DiffusionUtility:
   def __init__(self, 
-    b0=0.1, b1=20.0, scheduler='linear', timesteps=1000, model_pred='noise', 
-    reverse_stride=1, gen_method='ddim', ddim_eta = 1.0,
+    b0=0.1, b1=20.0, scheduler='linear', timesteps=1000, 
+    pred_type='image', reverse_stride=1, ddim_eta = 1.0,
     ):
     self.b0 = b0
     self.b1 = b1
@@ -20,8 +20,7 @@ class DiffusionUtility:
     self.CLIP_MIN = -1.0
     self.CLIP_MAX = 1.0
     self.reverse_stride = reverse_stride
-    self.model_pred = model_pred
-    self.gen_method = gen_method
+    self.pred_type = pred_type
     self.ddim_eta = ddim_eta
     assert isinstance(timesteps, int)
     assert isinstance(reverse_stride, int)
@@ -33,7 +32,7 @@ class DiffusionUtility:
       same as original DDPM paper, normalize time to 0 ~ 1
       beta(t) = b0 + (b1-b0)*t, for 0 <= t <= 1
       integrated_beta(t): B(t) = b0*t + 0.5*(b1-b0)*t^2, for 0 <= t <= 1
-      alpha(t) === exp(-B(t))
+      alpha(t) === exp(-1*B(t))
       alpha_ts === alpha(t)/alpha(s), for t > s >=0
       for discrete time sampling:
         alpha(s) = alpha(t-n) for n>=1, n is the reverse stride
@@ -54,7 +53,7 @@ class DiffusionUtility:
       same as iDDPM paper, use cosine scheduler for alpha(t)
       for cosine scheduler, 
       directly define alpha(t) is better than defining beta(t)
-      alpha(t) === exp(-B(t)) = cos(t*pi/2)^2  ; for 0 <= t <= 1
+      alpha(t) === exp(-0.5*B(t)) = cos(t*pi/2)  ; for 0 <= t <= 1
         --> alpha(0) = 1, alpha(1) = 0
       B(t) = -2*log(cos(t*pi/2))
         --> B(0)=0 , B(1)=inf
@@ -74,9 +73,9 @@ class DiffusionUtility:
       return 
     
     # for forward sampling
-    mu_coefs = np.sqrt(alpha_t) 
+    mu_coefs = np.sqrt(alpha_t)
     var_coefs = 1 - alpha_t
-    sigma_coefs = np.sqrt(var_coefs) # sqrt(1-alpha(t))
+    sigma_coefs = np.sqrt(var_coefs)
     # define constant Tensors
     self.mu_coefs = tf.constant(mu_coefs, tf.float32)
     self.var_coefs = tf.constant(var_coefs, tf.float32)
@@ -112,45 +111,61 @@ class DiffusionUtility:
       t: 1D integer index tensor, shape=[batch], value=0, 1, 2, 3, ..., N
       noise: 4D gaussian random number tensor, shape=[batch, h, w, c]
     """
-    sigma_t = tf.gather(self.sigma_coefs, t)
-    mu_t = tf.gather(self.mu_coefs, t)
-    x_t = mu_t[:,None,None,None]*x_0 + sigma_t[:,None,None,None] * noise
-    return x_t
+    sigma_t = tf.gather(self.sigma_coefs, t)[:,None,None,None]
+    mu_t = tf.gather(self.mu_coefs, t)[:,None,None,None]
+    x_t = mu_t * x_0 + sigma_t * noise
+    # velocity
+    v_t = mu_t * noise - sigma_t * x_0
+    return (x_t, v_t)
   
-  def x0_estimator(self, x_t, t, pred_noise, clip_denoise=True):
+  def get_pred_components(self, x_t, t, pred_type, y_pred, clip_denoise=False):
     """
-      Reconstruct x0 by pred_noise, this is original DDPM method
     """
-    sigma_t = tf.gather(self.sigma_coefs, t)
-    mu_t = tf.gather(self.mu_coefs, t)
-    x_0 = (x_t - sigma_t[:,None,None,None] * pred_noise) / (self.eps+mu_t[:,None,None,None])
-    if clip_denoise:
-      x_0 = tf.clip_by_value(x_0, self.CLIP_MIN, self.CLIP_MAX)
-    return x_0
+    var_t = tf.gather(self.var_coefs, t)[:,None,None,None]
+    sigma_t = tf.gather(self.sigma_coefs, t)[:,None,None,None]
+    mu_t = tf.gather(self.mu_coefs, t)[:,None,None,None]
+    (pred_noise, pred_image, pred_velocity) = (None, None, None)
+    if pred_type=='noise':
+      pred_noise = y_pred
+      pred_image = (x_t - sigma_t * pred_noise) / (self.eps+mu_t)
+      pred_velocity = mu_t * pred_noise - sigma_t * pred_image
+    elif pred_type=='image':
+      pred_image = y_pred
+      pred_noise = (x_t - mu_t * pred_image) / sigma_t
+      pred_velocity = mu_t * pred_noise - sigma_t * pred_image
+    elif pred_type=='both':
+      pred_image, pred_noise = y_pred
+      x0_1 = var_t[:,None,None,None]*pred_image
+      x0_2 = mu_t*(x_t - sigma_t[:,None,None,None]*pred_noise)
+      pred_image = x0_1 + x0_2
+      pred_velocity = mu_t * pred_noise - sigma_t * pred_image
+    elif pred_type=='velocity':
+      pred_velocity = y_pred
+      pred_image = mu_t * x_t - sigma_t * pred_velocity
+      pred_noise = (x_t - mu_t * pred_image) / sigma_t
+    else:
+      raise NotImplementedError
 
-  def q_reverse_mean_sigma(self, x_0, x_t, t, pred_noise, method):
+    if clip_denoise:
+      pred_image = tf.clip_by_value(pred_image, self.CLIP_MIN, self.CLIP_MAX)
+    return (pred_noise, pred_image, pred_velocity)
+
+  def q_reverse_mean_sigma(self, x_0, x_t, t, pred_noise=None):
     """
       Compute the mean and variance of the diffusion posterior q(x_s | x_t, x_0).
       s = t-n, n>=1
       t: 1D integer index tensor: 1, 2, 3, ..., N
       method = 'ddim' or 'ddpm'
     """
-    if method=='ddpm':
-      # DDPM reverse sampling formula
-      c_mu_t = tf.gather(self.reverse_mu_ddpm_xt, t)
-      c_mu_0 = tf.gather(self.reverse_mu_ddpm_x0, t)
-      _mean = c_mu_0[:,None,None,None]*x_0 + c_mu_t[:,None,None,None] * x_t
-      _sigma = tf.gather(self.reverse_sigma_coefs, t)
-    elif method=='ddim':
-      assert self.model_pred=='noise'
-      # DDIM reverse sampling formula
-      c_mu_ddim_0 = tf.gather(self.reverse_mu_ddim_x0, t)
-      c_mu_ddim_e = tf.gather(self.reverse_mu_ddim_e, t)
-      _mean = c_mu_ddim_0[:,None,None,None]*x_0 + c_mu_ddim_e[:,None,None,None]*pred_noise
-      _sigma = self.ddim_eta * tf.gather(self.reverse_sigma_coefs, t)
-    else:
-      _mean, _sigma = (None, None)
-    return (_mean, _sigma[:,None,None,None])
+    mu_t = tf.gather(self.mu_coefs, t)[:,None,None,None]
+    sigma_t = tf.gather(self.sigma_coefs, t)[:,None,None,None]
+    rev_mu_ddim_0 = tf.gather(self.reverse_mu_ddim_x0, t)[:,None,None,None]
+    rev_mu_ddim_e = tf.gather(self.reverse_mu_ddim_e, t)[:,None,None,None]
+    if pred_noise is None:
+      pred_noise = (x_t-mu_t * x_0)/sigma_t
+    _mean = rev_mu_ddim_0 * x_0 + rev_mu_ddim_e * pred_noise
+    _sigma = self.ddim_eta * tf.gather(self.reverse_sigma_coefs, t)[:,None,None,None]
+    return (_mean, _sigma)
 
   def p_sample(self, pred_mean, pred_sigma):
     noise = tf.random.normal(shape=pred_mean.shape, dtype=tf.float32)
@@ -291,23 +306,30 @@ def build_model(
   image_channel, 
   widths, 
   has_attention,
-  #attn_resolutions=(16,),
   num_resnet_blocks=2, 
   norm_groups=8, 
   interpolation="nearest",
   activation_fn=keras.activations.swish,
+  block_size=1,
+  pred_both=False,
   ):
   #
   input_shape = (image_size, image_size, image_channel)
   image_input = keras.Input(shape=input_shape, name="image_input")
   time_input = keras.Input(shape=(), dtype=tf.int64, name="time_input")
 
+  if block_size >1 :
+    assert image_size%block_size==0
+    x = tf.nn.space_to_depth(image_input, block_size, name="s2d")
+  else:
+    x = image_input
+
   x = keras.layers.Conv2D(
     widths[0],
     kernel_size=(3, 3),
     padding="same",
     kernel_initializer=kernel_init(1.0),
-    )(image_input)
+    )(x)
 
   temb = TimeEmbedding(dim=widths[0] * 4)(time_input)
   temb = TimeMLP(units=widths[0] * 4, activation_fn=activation_fn)(temb)
@@ -319,7 +341,6 @@ def build_model(
     for _ in range(num_resnet_blocks):
       x = ResidualBlock(
         widths[i], groups=norm_groups, activation_fn=activation_fn)([x, temb])
-      #if x.shape[1] in attn_resolutions:
       if has_attention[i]:
         x = AttentionBlock(widths[i], groups=norm_groups)(x)
       skips.append(x)
@@ -341,7 +362,6 @@ def build_model(
       x = keras.layers.Concatenate(axis=-1)([x, skips.pop()])
       x = ResidualBlock(widths[i], 
         groups=norm_groups, activation_fn=activation_fn)([x, temb])
-      #if x.shape[1] in attn_resolutions:
       if has_attention[i]:
         x = AttentionBlock(widths[i], groups=norm_groups)(x)
     if i != 0:
@@ -350,9 +370,15 @@ def build_model(
   # End block
   x = keras.layers.GroupNormalization(groups=norm_groups)(x)
   x = activation_fn(x)
-  x = keras.layers.Conv2D(image_channel, (3, 3), padding="same", 
+  x = keras.layers.Conv2D(image_channel*(block_size**2), (3, 3), padding="same", 
     kernel_initializer=kernel_init(0.0),
+    name="final_conv2d",
     )(x)
+  if block_size>1:
+    x = tf.nn.depth_to_space(x, block_size)
+  if pred_both:
+    x = keras.layers.Conv2D(image_channel*2, (3,3), padding='same')(x)
+    x = tf.split(x, 2, axis=-1)
   return keras.Model([image_input, time_input], x, name="unet")
 
 
@@ -364,79 +390,102 @@ class DiffusionModel(keras.Model):
     self.timesteps = timesteps
     self.diff_util = diff_util
     self.ema = ema
-    self.loss_tracker = keras.metrics.Mean(name="loss")
-    self.image_loss_tracker = keras.metrics.Mean(name="image_loss")
-    
-    assert self.diff_util.model_pred is not None
+    self.loss_tracker = keras.metrics.Mean(name='loss')
+    self.noise_loss_tracker = keras.metrics.Mean(name="n_loss")
+    self.image_loss_tracker = keras.metrics.Mean(name="i_loss")
+    self.velocity_loss_tracker = keras.metrics.Mean(name="v_loss")
+    assert self.diff_util.pred_type is not None
 
   @property
   def metrics(self):
-    return [self.loss_tracker, self.image_loss_tracker]
+    return [self.loss_tracker, 
+            self.noise_loss_tracker, 
+            self.image_loss_tracker, 
+            self.velocity_loss_tracker,
+            ]
 
   def train_step(self, images):
-    # 1. Get the batch size
     batch_size = tf.shape(images)[0]
-
-    # 2. Sample timesteps uniformly
-    # t is time index tensor
+    # Sample timesteps uniformly, t is time index tensor
     t = tf.random.uniform(minval=1, maxval=self.timesteps+1, 
       shape=(batch_size,), dtype=tf.int64)
 
     with tf.GradientTape() as tape:
-      # 3. Sample random noise to be added to the images in the batch
-      noise = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
+      # Sample random noise to be added to the images in the batch
+      noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
+      # Diffuse the images with noise
+      (images_t, v_t) = self.diff_util.q_sample(images, t, noises)
 
-      # 4. Diffuse the images with noise
-      images_t = self.diff_util.q_sample(images, t, noise)
+      y_pred = self.network([images_t, t], training=True)
 
-      # 5. Pass the diffused images and time steps to the network
-      if self.diff_util.model_pred=='noise':
-        pred_noise = self.network([images_t, t], training=True)
-        pred_start = self.diff_util.x0_estimator(images_t, t, pred_noise)
-      elif self.diff_util.model_pred=='start':
-        raise NotImplementedError
+      pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
+        images_t, t, self.diff_util.pred_type, y_pred)
+
+      noise_loss = self.loss(noises, pred_noise)
+      image_loss = self.loss(images, pred_image)
+      velocity_loss = self.loss(v_t, pred_velocity)
+      if self.diff_util.pred_type=='noise':
+        loss = noise_loss
+      elif self.diff_util.pred_type=='image':
+        loss = image_loss
+      elif self.diff_util.pred_type=='velocity':
+        loss = velocity_loss
+      elif self.diff_util.pred_type=='both':
+        loss = noise_loss + image_loss
       else:
-        pred_start = None
-        pred_noise = None
+        loss = None
 
-      noise_loss = self.loss(noise, pred_noise)
-      image_loss = self.loss(images, pred_start)
+    # Get the gradients
+    gradients = tape.gradient(loss, self.network.trainable_weights)
 
-    # 7. Get the gradients
-    gradients = tape.gradient(noise_loss, self.network.trainable_weights)
-
-    # 8. Update the weights of the network
+    # Update the weights of the network
     self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
-    self.loss_tracker.update_state(noise_loss)
+    self.loss_tracker.update_state(loss)
+    self.noise_loss_tracker.update_state(noise_loss)
     self.image_loss_tracker.update_state(image_loss)
+    self.velocity_loss_tracker.update_state(velocity_loss)
 
-    # 9. Updates the weight values for the network with EMA weights
+    # Updates the weight values for the network with EMA weights
     for weight, ema_weight in zip(self.network.weights, self.ema_network.weights):
       ema_weight.assign(self.ema * ema_weight + (1 - self.ema) * weight)
 
-    # 10. Return loss values
+    # Return loss values
     return {m.name: m.result() for m in self.metrics}
 
   def test_step(self, images):
-    # using ema_network to evaluate
     batch_size = tf.shape(images)[0]
+    # Sample timesteps uniformly, t is time index tensor
     t = tf.random.uniform(minval=1, maxval=self.timesteps+1, 
       shape=(batch_size,), dtype=tf.int64)
-    noise = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
-    images_t = self.diff_util.q_sample(images, t, noise)
-    if self.diff_util.model_pred=='noise':
-      pred_noise = self.ema_network([images_t, t], training=False)
-      pred_start = self.diff_util.x0_estimator(images_t, t, pred_noise)
-    elif self.diff_util.model_pred=='start':
-      raise NotImplementedError
-    else:
-      pred_start = None
-      pred_noise = None
 
-    noise_loss = self.loss(noise, pred_noise)
-    image_loss = self.loss(images, pred_start)
-    self.loss_tracker.update_state(noise_loss)
+    # Sample random noise to be added to the images in the batch
+    noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
+    # Diffuse the images with noise
+    (images_t, v_t) = self.diff_util.q_sample(images, t, noises)
+    # use ema_network for validaiton
+    y_pred = self.ema_network([images_t, t], training=False)
+
+    pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
+      images_t, t, self.diff_util.pred_type, y_pred)
+
+    noise_loss = self.loss(noises, pred_noise)
+    image_loss = self.loss(images, pred_image)
+    velocity_loss = self.loss(v_t, pred_velocity)
+    if self.diff_util.pred_type=='noise':
+      loss = noise_loss
+    elif self.diff_util.pred_type=='image':
+      loss = image_loss
+    elif self.diff_util.pred_type=='velocity':
+      loss = velocity_loss
+    elif self.diff_util.pred_type=='both':
+      loss = noise_loss + image_loss
+    else:
+      loss = None
+
+    self.loss_tracker.update_state(loss)
+    self.noise_loss_tracker.update_state(noise_loss)
     self.image_loss_tracker.update_state(image_loss)
+    self.velocity_loss_tracker.update_state(velocity_loss)
 
     return {m.name: m.result() for m in self.metrics}
 
@@ -482,29 +531,26 @@ class DiffusionModel(keras.Model):
     reverse_timeindex = tf.range(self.timesteps, 0, -self.diff_util.reverse_stride)
     for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
       tt = tf.cast(tf.fill(tf.shape(samples)[0], t), dtype=tf.int64)
-      # model prediction
-      if self.diff_util.model_pred == 'noise':
-        pred_noise = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
-        x0_recon = self.diff_util.x0_estimator(samples, tt, pred_noise, 
-          clip_denoise=clip_denoise)
-      elif self.diff_util.model_pred == "start":
-        raise NotImplementedError
-      else:
-        return
-      
+      y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
+      pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
+        samples, tt, self.diff_util.pred_type, y_pred, 
+        clip_denoise=clip_denoise,
+        )
+
       pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(
-        x0_recon, samples, tt, pred_noise=pred_noise, 
-        method=self.diff_util.gen_method)
+        pred_image, samples, tt, pred_noise=pred_noise,
+        )
       
       samples = self.diff_util.p_sample(pred_mean, pred_sigma)
       
       if _freeze:
+        raise NotImplementedError
         # TODO, not yet completed
         #samples = tf.stack([ini_samples[:,:,:,0], samples[:,:,:,1]], axis=-1)
-        arr_0 = ini_samples.numpy()
-        arr_i = samples.numpy()
-        arr_0[:, 32:-32, 32:-32, :] = arr_i[:, 32:-32, 32:-32, :]
-        samples = tf.convert_to_tensor(arr_0, dtype=tf.float32)
+        #arr_0 = ini_samples.numpy()
+        #arr_i = samples.numpy()
+        #arr_0[:, 32:-32, 32:-32, :] = arr_i[:, 32:-32, 32:-32, :]
+        #samples = tf.convert_to_tensor(arr_0, dtype=tf.float32)
 
       if export_interm and t.numpy()%10==0:
         output_fn = os.path.join(savedir, "img_t_"+str(t.numpy()))
@@ -514,10 +560,7 @@ class DiffusionModel(keras.Model):
     
     # 3. Return generated samples
     ss = "x".join(list(map(str, samples.numpy().shape)))
-    if self.diff_util.gen_method=='ddpm':
-      output_fn = "ddpm_gen_"+ss
-    else:
-      output_fn = "ddim_eta"+str(self.diff_util.ddim_eta)+"_gen_"+ss
+    output_fn = "ddim_eta"+str(self.diff_util.ddim_eta)+"_gen_"+ss
     if not clip_denoise:
       output_fn = output_fn + "_raw"
     output_fn = os.path.join(savedir, output_fn)
@@ -531,6 +574,7 @@ class DiffusionModel(keras.Model):
 
 
 if __name__=="__main__":
+  # simple unittest
   timesteps = 10
   gdu = DiffusionUtility(b0=0.1, b1=20, timesteps=timesteps)
   batch_size = 10
@@ -541,8 +585,9 @@ if __name__=="__main__":
   for t in reversed(range(1, timesteps+1)):
     tt = tf.cast(tf.fill(batch_size, t), dtype=tf.int64)
     mean_tt, sigma_tt = gdu.q_reverse_mean_sigma(
-      x0, samples, tt, pred_noise=None, gen_method='ddpm')
+      x0, samples, tt, pred_noise=None)
 
     print(t, np.squeeze(mean_tt.numpy()), np.squeeze(sigma_tt.numpy()))
-    samples = gdu.p_sample(mean_tt, sigma_tt, tt)
+    samples = gdu.p_sample(mean_tt, sigma_tt)
 
+  print(arr)

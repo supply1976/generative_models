@@ -28,6 +28,7 @@ class DataLoader:
     self.crop_size = crop_size
     self.npz_key = npz_key
     self.data_dir = os.path.abspath(data_dir)
+    self.dataset_repeat = dataset_repeat
     self.npzfiles = []
     for root, dirs, files in os.walk(self.data_dir):
       for fn in files:
@@ -64,13 +65,13 @@ class DataLoader:
       img = (img) *(CLIP_MAX-CLIP_MIN) + CLIP_MIN
       return img
 
-    train_ds = train_ds.cache().repeat(dataset_repeat)
+    train_ds = train_ds.cache().repeat(self.dataset_repeat)
     train_ds = train_ds.shuffle(train_ds.cardinality())
     train_ds = train_ds.map(
       lambda x: tf.py_function(_preprocess, [x], tf.float32),
       num_parallel_calls=tf.data.AUTOTUNE)
     # valid ds  
-    valid_ds = valid_ds.cache().repeat(dataset_repeat)
+    valid_ds = valid_ds.cache().repeat(self.dataset_repeat)
     valid_ds = valid_ds.map(
       lambda x: tf.py_function(_preprocess, [x], tf.float32),
       num_parallel_calls=tf.data.AUTOTUNE)
