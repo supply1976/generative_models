@@ -491,8 +491,8 @@ class DiffusionModel(keras.Model):
 
   def save_model(self, epoch, logs=None, savedir=None):
     epo = str(epoch).zfill(5)
-    #if epoch%100==0:
-    #  self.ema_network.save_weights(os.path.join(savedir, f"ema_epoch_{epo}.weights.h5"))
+    if epoch%1000==0:
+      self.ema_network.save_weights(os.path.join(savedir, f"ema_epoch_{epo}.weights.h5"))
     self.ema_network.save_weights(os.path.join(savedir, "ema_latest.weights.h5"))
 
   def generate_images(self, epoch=None, logs=None, 
@@ -542,7 +542,10 @@ class DiffusionModel(keras.Model):
         )
       
       samples = self.diff_util.p_sample(pred_mean, pred_sigma)
-      
+      del pred_noise
+      del pred_image
+      del pred_velocity
+      del y_pred
       if _freeze:
         raise NotImplementedError
         # TODO, not yet completed

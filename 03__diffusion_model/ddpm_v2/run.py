@@ -26,7 +26,7 @@ def main():
   parser.add_argument("--config", type=str, required=True)
   parser.add_argument("--training", dest='training', action='store_true')
   parser.add_argument("--imgen", dest='imgen', action='store_true')
-  parser.add_argument("--regen_with_clip_denoise", action='store_true')
+  parser.add_argument("--clip_denoise", action='store_true')
   FLAGS, _ = parser.parse_known_args()
   
   with open(FLAGS.config, 'r') as f:
@@ -80,7 +80,6 @@ def main():
   gen_output_dir   = imgen_dict['GEN_OUTPUT_DIR']
   ddim_eta         = imgen_dict['DDIM_ETA']
   random_seed      = imgen_dict['RANDOM_SEED']
-
 
   # GPU devices
   gpus = tf.config.list_physical_devices("GPU")
@@ -150,9 +149,10 @@ def main():
       )
     if not os.path.isdir(dataset_tag): os.mkdir(dataset_tag)
     # create model nametag
-    model_nametag = "unet"+str(first_channel)+"cm"+"".join(map(str, channel_multiplier))
-    model_nametag = model_nametag+"gn"+str(norm_groups)
-    model_nametag = model_nametag+"bs"+str(block_size)
+    model_nametag = "unet"+str(first_channel)+"m"+"".join(map(str, channel_multiplier))
+    model_nametag = model_nametag+"g"+str(norm_groups)
+    model_nametag = model_nametag+"rb"+str(num_resnet_blocks)
+    model_nametag = model_nametag+"bk"+str(block_size)
     tr_output_dir = os.path.join(dataset_tag, model_nametag)
     if not os.path.isdir(tr_output_dir): os.mkdir(tr_output_dir)
 
@@ -320,7 +320,6 @@ def main():
     try:
       ddpm.load_weights(imgen_model_path)
     except:
-      print("here")
       ddpm.ema_network.load_weights(imgen_model_path)
       ddpm.network.set_weights(ddpm.ema_network.get_weights())
 
@@ -381,6 +380,8 @@ def main():
     else:
       return
 
+    clip_denoise = True if FLAGS.clip_denoise else False
+
     t0 = time.time()
     ddpm.generate_images(
       num_images=num_gen_images, 
@@ -388,20 +389,10 @@ def main():
       save_ini=False,
       _freeze=False,
       gen_inputs=gen_inputs,
+      clip_denoise=clip_denoise,
       export_interm=export_interm)
-    deltaT = np.around((time.time()-t0)/3600, 4)
-    logging.info("Generated {} images with {} hours".format(num_gen_images, deltaT))
-
-    # reset random_seed and repeat generation with clip_denoise=True
-    if FLAGS.regen_with_clip_denoise:
-      print("reset random_seed and repeat generation with clip_denoise=True")
-      tf.random.set_seed(random_seed)
-      ddpm.generate_images(
-        num_images=num_gen_images, 
-        savedir=gen_dir,
-        gen_inputs=gen_inputs,
-        clip_denoise=True,
-        export_interm=export_interm)
+    deltaT = np.around((time.time()-t0), 1)
+    logging.info("Generated {} images with {} seconds".format(num_gen_images, deltaT))
 
      
   else:
