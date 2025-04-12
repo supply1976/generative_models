@@ -9,12 +9,13 @@ import tqdm
 class DiffusionUtility:
   def __init__(self, 
     b0=0.1, b1=20.0, scheduler='linear', timesteps=1000, 
-    pred_type='image', reverse_stride=1, ddim_eta = 1.0,
+    pred_type='noise', reverse_stride=1, ddim_eta = 1.0,
     ):
     self.b0 = b0
     self.b1 = b1
     self.scheduler = scheduler
     self.timesteps = timesteps
+    # normalize time to 0 ~ 1
     self.timesamps = np.linspace(0, 1, timesteps+1, dtype=np.float64)
     self.eps = 1.0e-6
     self.CLIP_MIN = -1.0
@@ -24,6 +25,7 @@ class DiffusionUtility:
     self.ddim_eta = ddim_eta
     assert isinstance(timesteps, int)
     assert isinstance(reverse_stride, int)
+    assert reverse_stride >= 1
     assert timesteps % reverse_stride == 0
 
     mu_coefs, var_coefs = (None, None)
@@ -53,19 +55,16 @@ class DiffusionUtility:
       same as iDDPM paper, use cosine scheduler for alpha(t)
       for cosine scheduler, 
       directly define alpha(t) is better than defining beta(t)
-      alpha(t) === exp(-0.5*B(t)) = cos(t*pi/2)  ; for 0 <= t <= 1
+      alpha(t) === exp(-1*B(t)) = cos(t*pi/2)  ; for 0 <= t <= 1
         --> alpha(0) = 1, alpha(1) = 0
-      B(t) = -2*log(cos(t*pi/2))
+      B(t) = -1*log(cos(t*pi/2))
         --> B(0)=0 , B(1)=inf
       beta(t) === dB(t)/dt = tan(t*pi/2)
         --> beta(0)=0, beta(1)=inf
       """
-      alpha_t = (np.cos(self.timesamps*np.pi/2.0))**2
-      # the last element of alpha_t (at time=1): alpha_t[-1] = 0 (10^-31)
-      # which cause numerical issue in reverse sampling
-      # so set this to the value at time=0.999
-      # alpha_t[-1] = alpha_t[-2] ~ 10^-6
-      alpha_t[-1]=alpha_t[-2]
+      end_angle = 89 ; # degree, for cosine scheduler only, hard-coded
+      angles = self.timesamps * end_angle *np.pi / 180
+      alpha_t = np.cos(angles)**2
       # alpha_ts === alpha(t) / alpha(s) for t > s >= 0
       alpha_ts = alpha_t[reverse_stride:]/alpha_t[0:-reverse_stride]
     else:
@@ -235,6 +234,24 @@ class TimeEmbedding(keras.layers.Layer):
     return emb
 
 
+class SpaceToDepthLayer(keras.layers.Layer):
+  def __init__(self, block_size, **kwargs):
+    super().__init__(**kwargs)
+    self.block_size = block_size
+
+  def call(self, inputs):
+    return tf.nn.space_to_depth(inputs, self.block_size)
+
+
+class DepthToSpaceLayer(keras.layers.Layer):
+  def __init__(self, block_size, **kwargs):
+    super().__init__(**kwargs)
+    self.block_size = block_size
+
+  def call(self, inputs):
+    return tf.nn.depth_to_space(inputs, self.block_size)
+
+
 def ResidualBlock(width, groups=32, activation_fn=keras.activations.swish):
   def apply(inputs):
     x, t = inputs
@@ -320,7 +337,8 @@ def build_model(
 
   if block_size >1 :
     assert image_size%block_size==0
-    x = tf.nn.space_to_depth(image_input, block_size, name="s2d")
+    x = SpaceToDepthLayer(block_size)(image_input)
+    #x = tf.nn.space_to_depth(image_input, block_size, name="s2d")
   else:
     x = image_input
 
@@ -375,7 +393,8 @@ def build_model(
     name="final_conv2d",
     )(x)
   if block_size>1:
-    x = tf.nn.depth_to_space(x, block_size)
+    x = DepthToSpaceLayer(block_size)(x)
+    #x = tf.nn.depth_to_space(x, block_size)
   if pred_both:
     x = keras.layers.Conv2D(image_channel*2, (3,3), padding='same')(x)
     x = tf.split(x, 2, axis=-1)
