@@ -134,9 +134,7 @@ class DiffusionUtility:
       pred_velocity = mu_t * pred_noise - sigma_t * pred_image
     elif pred_type=='both':
       pred_image, pred_noise = y_pred
-      x0_1 = var_t[:,None,None,None]*pred_image
-      x0_2 = mu_t*(x_t - sigma_t[:,None,None,None]*pred_noise)
-      pred_image = x0_1 + x0_2
+      pred_image = var_t*pred_image + mu_t*(x_t-sigma_t*pred_noise)
       pred_velocity = mu_t * pred_noise - sigma_t * pred_image
     elif pred_type=='velocity':
       pred_velocity = y_pred
@@ -192,10 +190,18 @@ class AttentionBlock(keras.layers.Layer):
     super().__init__(**kwargs)
 
     self.norm = keras.layers.GroupNormalization(groups=groups)
-    self.query = keras.layers.Dense(units, kernel_initializer=kernel_init(1.0))
-    self.key = keras.layers.Dense(units, kernel_initializer=kernel_init(1.0))
-    self.value = keras.layers.Dense(units, kernel_initializer=kernel_init(1.0))
-    self.proj = keras.layers.Dense(units, kernel_initializer=kernel_init(0.0))
+    self.query = keras.layers.Dense(units,
+      kernel_initializer=kernel_init(1.0),
+      )
+    self.key = keras.layers.Dense(units, 
+      kernel_initializer=kernel_init(1.0),
+      )
+    self.value = keras.layers.Dense(units, 
+      kernel_initializer=kernel_init(1.0),
+      )
+    self.proj = keras.layers.Dense(units, 
+      kernel_initializer=kernel_init(0.0),
+      )
 
   def call(self, inputs):
     batch_size = tf.shape(inputs)[0]
@@ -261,7 +267,9 @@ def ResidualBlock(width, groups=32, activation_fn=keras.activations.swish):
       residual = x
     else:
       residual = keras.layers.Conv2D(
-        width, kernel_size=1, kernel_initializer=kernel_init(1.0))(x)
+        width, kernel_size=1, 
+        kernel_initializer=kernel_init(1.0),
+        )(x)
 
     temb = activation_fn(t)
     temb = keras.layers.Dense(
@@ -338,7 +346,6 @@ def build_model(
   if block_size >1 :
     assert image_size%block_size==0
     x = SpaceToDepthLayer(block_size)(image_input)
-    #x = tf.nn.space_to_depth(image_input, block_size, name="s2d")
   else:
     x = image_input
 
