@@ -401,7 +401,7 @@ def build_model(
     )(x)
   if block_size>1:
     x = DepthToSpaceLayer(block_size)(x)
-    #x = tf.nn.depth_to_space(x, block_size)
+    #x = tf.nn.depth_to_space(x, bloc_size)
   if pred_both:
     x = keras.layers.Conv2D(image_channel*2, (3,3), padding='same')(x)
     x = tf.split(x, 2, axis=-1)

@@ -134,13 +134,9 @@ def main():
       timesteps=timesteps,
       )
     
-    if dataset_name is None:
-      print("Training dataset name not found, Please provide training dataset name.")
-      print("Exit")
-      return 
+    assert dataset_name is not None
     
-    train_ds = None
-    valid_ds = None
+    (train_ds, valid_ds) = (None, None)
     input_shape = (input_image_size, input_image_size, input_image_channel)
     # create folder for dataset tag
     dataset_tag = os.path.join(
@@ -164,7 +160,6 @@ def main():
       os.mkdir(logging_dir)
       init_logging(os.path.join(logging_dir, "train.log"))
       logging.info("[INFO] Start a new training")
-      shutil.copy(FLAGS.config, os.path.join(logging_dir, "training_config.yaml"))
     else: 
       if trained_h5 is None:
         logging.info('if "IS_NEW_TRAIN: false", you must provide a trained .h5 file')
@@ -172,72 +167,52 @@ def main():
       else:
         # load .h5 file
         trained_h5 = os.path.abspath(trained_h5)
-        restored_model_dir = os.path.dirname(trained_h5)
+        restored_model_ID = os.path.basename(os.path.dirname(trained_h5))
+        restored_model_ID = restored_model_ID.split("_")[-1]
         try:
           ddpm.load_weights(trained_h5)
         except:
           ddpm.ema_network.load_weights(trained_h5)
           ddpm.network.set_weights(ddpm.ema_network.get_weights())
 
-      logging_dir = os.path.join(restored_model_dir, "transfer_"+dateID)
+      logging_dir = os.path.join(tr_output_dir, dateID+"_from_"+restored_model_ID)
       os.mkdir(logging_dir)
       init_logging(os.path.join(logging_dir,"train.log"))
       logging.info("[INFO] Restoring model from: {}".format(trained_h5))
       logging.info("[INFO] Continuous Transfer training ...")
-      shutil.copy(FLAGS.config, os.path.join(logging_dir, "training_config.yaml"))
+    
+    shutil.copy(FLAGS.config, os.path.join(logging_dir, "training_config.yaml"))
     # end of creating logging_dir 
 
     logging.info("[INFO] Training Start Time: {}".format(datetime.datetime.now()))
     t0 = time.time()
-    if dataset_name == "cifar10":
-      # use internal keras cifar10 dataset for quick testing
-      # ignore dataset_path when use these two dataset_name
-      logging.info("[INFO] Use internal keras dataset {} ".format(dataset_name))
-      (train_images, _), (valid_images, _) = keras.datasets.cifar10.load_data()
-
-      train_images = train_images.astype(np.float32)
-      train_images = 2*(train_images / 255.0) - 1 ; # rescale to (-1, 1)
-      valid_images = valid_images.astype(np.float32)
-      valid_images = 2*(valid_images / 255.0) - 1 ; # rescale to (-1, 1)
-      train_ds = tf.data.Dataset.from_tensor_slices(train_images)
-      train_ds = train_ds.cache()
-      train_ds = train_ds.shuffle(train_ds.cardinality())
-      valid_ds = tf.data.Dataset.from_tensor_slices(valid_images)
-      valid_ds = valid_ds.cache()
-
+    
+    assert dataset_path is not None
+    logging.info("[INFO] User defined dataset name:{}".format(dataset_name))
+    if os.path.isdir(dataset_path):
+      logging.info("[INFO] Use a folder contains multiple npz files for training")
+      logging.info("[INFO] Dataset path: {}".format(dataset_path))
+      dataloader = DataLoader(
+        data_dir=dataset_path, 
+        crop_size=clip_size,
+        dataset_repeat=dataset_repeat,
+        )
+      train_ds, valid_ds = dataloader.load_dataset()
     else:
-      # for other dataset_name, check the dataset_path
-      if dataset_path is None:
-        logging.error("Please provide dataset path, Exit")
-        return
-      else:
-        logging.info("[INFO] User defined dataset name:{}".format(dataset_name))
-        if os.path.isdir(dataset_path):
-          logging.info("[INFO] Use a folder contains multiple npz files for training")
-          logging.info("[INFO] Dataset path: {}".format(dataset_path))
-          dataloader = DataLoader(
-            data_dir=dataset_path, 
-            crop_size=clip_size,
-            dataset_repeat=dataset_repeat,
-            )
-          train_ds, valid_ds = dataloader.load_dataset()
-        elif os.path.isfile(dataset_path):
-          logging.info("use single (big) npz file for trainingg")
-          data = np.load(dataset_path)
-          all_images = data['images']
-          all_images = 2*(all_images) - 1.0
-          idx = np.arange(len(all_images))
-          np.random.shuffle(idx)
-          num_val = int(0.1*len(all_images))
-          train_ds = tf.data.Dataset.from_tensor_slices(all_images)
-          valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val])
-          train_ds = train_ds.cache().repeat(dataset_repeat)
-          valid_ds = valid_ds.cache().repeat(dataset_repeat)
-          train_ds = train_ds.shuffle(train_ds.cardinality())
-        else:
-          return
-    # make sure train dataset is prepared
-    assert train_ds is not None
+      assert os.path.isfile(dataset_path)
+      assert dataset_path.endswith(".npz")
+      logging.info("[INFO] Use single (big) npz file for training")
+      all_images = np.load(dataset_path)['images']
+      all_images = 2*(all_images) - 1.0  ; # (0, 1) -> (-1, 1)
+      idx = np.arange(len(all_images))
+      np.random.shuffle(idx)
+      num_val = int(0.1*len(all_images))
+      train_ds = tf.data.Dataset.from_tensor_slices(all_images)
+      train_ds = train_ds.cache().repeat(dataset_repeat)
+      train_ds = train_ds.shuffle(train_ds.cardinality())
+      valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val])
+      valid_ds = valid_ds.cache()
+    
     train_ds = train_ds.batch(batch_size, drop_remainder=True)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     valid_ds = valid_ds.batch(batch_size)
@@ -254,15 +229,15 @@ def main():
     callback_save_ema_latest = keras.callbacks.LambdaCallback(
       on_epoch_end=lambda epoch,logs: ddpm.save_model(epoch, savedir=logging_dir))
     callback_genimages = keras.callbacks.LambdaCallback(
-      on_train_end=ddpm.generate_images)
+      on_train_end=lambda epoch,logs: ddpm.generate_images(savedir=logging_dir))
     
     logging.info("[INFO] Forward Training Steps: {}".format(timesteps))
     logging.info("[INFO] Scheduler: {} ".format(scheduler))
     logging.info("[INFO] Learning Rate: {}".format(learning_rate))
     logging.info("[INFO] Predict Type: {}".format(pred_type))
     logging.info("[INFO] Loss Function: {}".format(loss_fn))
-
     logging.info("[INFO] Total Epochs: {}".format(epochs))
+    logging.info("[INFO] Dataset Repeat: {}".format(dataset_repeat))
 
     csv_logger = CSVLogger(os.path.join(logging_dir, "log.csv"), append=True, separator=",")
     best_ckpt_path = os.path.join(logging_dir, "dm_best.weights.h5")
@@ -277,7 +252,8 @@ def main():
       csv_logger, 
       callback_save_ema_latest,
       callback_save_ema_best,
-      callback_genimages]
+      callback_genimages,
+      ]
 
     if loss_fn == "MAE":
       loss_fn = keras.losses.MeanAbsoluteError()
@@ -299,7 +275,7 @@ def main():
       train_ds,
       validation_data=valid_ds,
       epochs=epochs,
-      callbacks=callback_list
+      callbacks=callback_list,
       )
     deltaT = np.around((time.time() - t0)/3600.0, 4)
     nowT = datetime.datetime.now()
@@ -401,4 +377,4 @@ def main():
 
 
 if __name__=="__main__":
-    main()
+  main()
