@@ -229,7 +229,7 @@ def main():
     callback_save_ema_latest = keras.callbacks.LambdaCallback(
       on_epoch_end=lambda epoch,logs: ddpm.save_model(epoch, savedir=logging_dir))
     callback_genimages = keras.callbacks.LambdaCallback(
-      on_train_end=lambda epoch,logs: ddpm.generate_images(savedir=logging_dir))
+      on_train_end=lambda logs: ddpm.generate_images(savedir=logging_dir))
     
     logging.info("[INFO] Forward Training Steps: {}".format(timesteps))
     logging.info("[INFO] Scheduler: {} ".format(scheduler))
