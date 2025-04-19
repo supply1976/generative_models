@@ -5,6 +5,8 @@ import tensorflow as tf
 from tensorflow import keras
 import tqdm
 
+tf.debugging.disable_traceback_filtering()
+
 
 class DiffusionUtility:
   def __init__(self, 
@@ -156,11 +158,13 @@ class DiffusionUtility:
     """
     mu_t = tf.gather(self.mu_coefs, t)[:,None,None,None]
     sigma_t = tf.gather(self.sigma_coefs, t)[:,None,None,None]
+
     rev_mu_ddim_0 = tf.gather(self.reverse_mu_ddim_x0, t)[:,None,None,None]
     rev_mu_ddim_e = tf.gather(self.reverse_mu_ddim_e, t)[:,None,None,None]
     if pred_noise is None:
       pred_noise = (x_t-mu_t * x_0)/sigma_t
-    _mean = rev_mu_ddim_0 * x_0 + rev_mu_ddim_e * pred_noise
+    _mean = keras.layers.Add()([rev_mu_ddim_0*x_0, rev_mu_ddim_e*pred_noise])
+    #_mean = rev_mu_ddim_0 * x_0 + rev_mu_ddim_e * pred_noise
     _sigma = self.ddim_eta * tf.gather(self.reverse_sigma_coefs, t)[:,None,None,None]
     return (_mean, _sigma)
 
@@ -517,7 +521,7 @@ class DiffusionModel(keras.Model):
 
   def save_model(self, epoch, logs=None, savedir=None):
     epo = str(epoch).zfill(5)
-    if epoch%1000==0:
+    if epoch%1000==0 and epoch>0:
       self.ema_network.save_weights(os.path.join(savedir, f"ema_epoch_{epo}.weights.h5"))
     self.ema_network.save_weights(os.path.join(savedir, "ema_latest.weights.h5"))
 
