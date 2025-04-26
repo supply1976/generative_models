@@ -69,6 +69,16 @@ class DiffusionUtility:
       alpha_t = np.cos(angles)**2
       # alpha_ts === alpha(t) / alpha(s) for t > s >= 0
       alpha_ts = alpha_t[reverse_stride:]/alpha_t[0:-reverse_stride]
+
+    elif self.scheduler == 'cos6':
+      """
+      experiment only
+      """
+      end_angle = 80 ; # degree
+      angles = self.timesamps * end_angle *np.pi / 180
+      alpha_t = np.cos(angles)**6
+      # alpha_ts === alpha(t) / alpha(s) for t > s >= 0
+      alpha_ts = alpha_t[reverse_stride:]/alpha_t[0:-reverse_stride]
     else:
       print("not supported diffusion scheduler, exit")
       return 
