@@ -9,7 +9,7 @@ from tensorflow.keras.callbacks import CSVLogger
 import modelDef
 from data_loader import DataLoader
 
-tf.debugging.disable_traceback_filtering()
+#tf.debugging.disable_traceback_filtering()
 
 
 def init_logging(filename, checkpoint=None):
@@ -61,7 +61,7 @@ def main():
   # network
   scheduler          = training_dict['NETWORK']['SCHEDULER']
   timesteps          = training_dict['NETWORK']['TIMESTEPS']
-  num_resnet_blocks  = training_dict['NETWORK']['NUM_RESNET_BLOCKS']
+  num_res_blocks     = training_dict['NETWORK']['NUM_RES_BLOCKS']
   block_size         = training_dict['NETWORK']['BLOCK_SIZE']
   norm_groups        = training_dict['NETWORK']['NORM_GROUPS']
   first_channel      = training_dict['NETWORK']['FIRST_CHANNEL']
@@ -89,25 +89,25 @@ def main():
 
   # Build (initialize) the unet model
   network = modelDef.build_model(
-    image_size    = input_image_size, 
-    image_channel = input_image_channel,
-    widths = widths,
-    has_attention = has_attention,
-    num_resnet_blocks = num_resnet_blocks,
-    norm_groups = norm_groups,
-    activation_fn = keras.activations.swish,
-    block_size = block_size,
+    image_size     = input_image_size, 
+    image_channel  = input_image_channel,
+    widths         = widths,
+    has_attention  = has_attention,
+    num_res_blocks = num_res_blocks,
+    norm_groups    = norm_groups,
+    activation_fn  = keras.activations.swish,
+    block_size     = block_size,
     )
   
   ema_network = modelDef.build_model(
-    image_size    = input_image_size, 
-    image_channel = input_image_channel,
-    widths = widths,
-    has_attention = has_attention,
-    num_resnet_blocks = num_resnet_blocks,
-    norm_groups = norm_groups,
-    activation_fn = keras.activations.swish,
-    block_size = block_size,
+    image_size     = input_image_size, 
+    image_channel  = input_image_channel,
+    widths         = widths,
+    has_attention  = has_attention,
+    num_res_blocks = num_res_blocks,
+    norm_groups    = norm_groups,
+    activation_fn  = keras.activations.swish,
+    block_size     = block_size,
     )
 
   network.summary()
@@ -149,7 +149,7 @@ def main():
     # create model nametag
     model_nametag = "unet"+str(first_channel)+"m"+"".join(map(str, channel_multiplier))
     model_nametag = model_nametag+"g"+str(norm_groups)
-    model_nametag = model_nametag+"rb"+str(num_resnet_blocks)
+    model_nametag = model_nametag+"rb"+str(num_res_blocks)
     model_nametag = model_nametag+"bk"+str(block_size)
     tr_output_dir = os.path.join(dataset_tag, model_nametag)
     if not os.path.isdir(tr_output_dir): os.mkdir(tr_output_dir)
@@ -171,11 +171,8 @@ def main():
         trained_h5 = os.path.abspath(trained_h5)
         restored_model_ID = os.path.basename(os.path.dirname(trained_h5))
         restored_model_ID = restored_model_ID.split("_")[-1]
-        try:
-          ddpm.load_weights(trained_h5)
-        except:
-          ddpm.ema_network.load_weights(trained_h5)
-          ddpm.network.set_weights(ddpm.ema_network.get_weights())
+        ddpm.ema_network.load_weights(trained_h5)
+        ddpm.network.set_weights(ddpm.ema_network.get_weights())
 
       logging_dir = os.path.join(tr_output_dir, dateID+"_from_"+restored_model_ID)
       os.mkdir(logging_dir)
@@ -220,7 +217,7 @@ def main():
     valid_ds = valid_ds.batch(batch_size)
     valid_ds = valid_ds.prefetch(tf.data.AUTOTUNE)
       
-    # get input image shape (preprocessed)
+    # get input image shape
     for x in train_ds.take(1):
       _, h, w, c = x.shape
       logging.info("dataset one batch info: {}".format(x.shape))
@@ -242,18 +239,19 @@ def main():
     logging.info("[INFO] Dataset Repeat: {}".format(dataset_repeat))
 
     csv_logger = CSVLogger(os.path.join(logging_dir, "log.csv"), append=True, separator=",")
-    best_ckpt_path = os.path.join(logging_dir, "dm_best.weights.h5")
-    callback_save_ema_best = keras.callbacks.ModelCheckpoint(
-      filepath=best_ckpt_path,
-      save_weights_only=True,
-      monitor='val_loss',
-      mode='min',
-      save_best_only=True,
-      )
+    #best_ckpt_path = os.path.join(logging_dir, "dm_best.weights.h5")
+    #callback_save_ema_best = keras.callbacks.ModelCheckpoint(
+    #  filepath=best_ckpt_path,
+    #  save_weights_only=True,
+    #  monitor='val_loss',
+    #  mode='min',
+    #  save_best_only=True,
+    #  )
+    
     callback_list = [
       csv_logger, 
       callback_save_ema_latest,
-      callback_save_ema_best,
+      #callback_save_ema_best,
       callback_genimages,
       ]
 
@@ -295,11 +293,7 @@ def main():
       diff_util=diff_util_infer,
       timesteps=timesteps,
       )
-    try:
-      ddpm.load_weights(imgen_model_path)
-    except:
-      ddpm.ema_network.load_weights(imgen_model_path)
-      ddpm.network.set_weights(ddpm.ema_network.get_weights())
+    ddpm.ema_network.load_weights(imgen_model_path)
 
     if gen_output_dir is None: 
       gen_steps = str(diff_util_infer.timesteps // diff_util_infer.reverse_stride)+"steps"
@@ -314,21 +308,23 @@ def main():
     logging.info("[IMGEN] Start to generate images using model: {}".format(imgen_model_path))
     logging.info("[IMGEN] model predict type: {}".format(diff_util_infer.pred_type))
     logging.info("[IMGEN] DDIM eta = {}".format(diff_util_infer.ddim_eta))
-    logging.info("[IMGEN] set random seed: {}".format(random_seed))
+    logging.info("[IMGEN] Set random seed: {}".format(random_seed))
+    logging.info("[IMGEN] clip_denoise: {}".format(FLAGS.clip_denoise))
+
     tf.random.set_seed(random_seed)
 
     if gen_inputs is None:
-      logging.info("Generating Images from pure random noise")
+      logging.info("Generating Images from standard Gaussian noise")
       pass
 
     elif os.path.isfile(gen_inputs) and gen_inputs.endswith('npz'):
       logging.info("Use external .npz file as start to generate images")
       logging.info("Generating Images from {}".format(gen_inputs))
       data = np.load(gen_inputs)['images']
-      gen_inputs = tf.convert_to_tensor(data, tf.float32)
+      gen_inputs = tf.identity(data, tf.float32)
     
     elif gen_inputs == "identical_noise":
-      logging.info("Generating Images from identical noise")
+      logging.info("Generating Images from identical Gaussian noise")
       _shape=(1, input_image_size, input_image_size, input_image_channel)
       gen_inputs = tf.random.normal(shape=_shape, dtype=tf.float32)
       gen_inputs = tf.tile(gen_inputs, [num_gen_images, 1,1,1])
@@ -352,9 +348,6 @@ def main():
         zlist.append(tf.random.normal(shape=_shape, dtype=tf.float32))
       gen_inputs = tf.concat(zlist, axis=0)
     
-    elif gen_inputs == "custom2":
-      pass
-
     else:
       return
 
@@ -364,17 +357,14 @@ def main():
     ddpm.generate_images(
       num_images=num_gen_images, 
       savedir=gen_dir,
-      save_ini=False,
-      _freeze=False,
       gen_inputs=gen_inputs,
       clip_denoise=clip_denoise,
       export_interm=export_interm)
+    #
     deltaT = np.around((time.time()-t0), 1)
     logging.info("Generated {} images with {} seconds".format(num_gen_images, deltaT))
 
-     
   else:
-    ddpm.summary()
     print("no action")
 
 
