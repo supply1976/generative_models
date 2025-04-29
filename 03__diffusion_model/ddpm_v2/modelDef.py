@@ -582,7 +582,10 @@ class DiffusionModel(keras.Model):
       keras.backend.clear_session()
       gc.collect()
       # fetch current/peak GPU memory
-      mem = tf.config.experimental.get_memory_info("GPU:0")
+      try:
+        mem = tf.config.experimental.get_memory_info("GPU:0")
+      except:
+        mem = tf.config.experimental.get_memory_info("CPU:0")
       curr_mb = mem['current'] / (1024**2)
       peak_mb = mem['peak'] / (1024**2)
       mem_log.writelines("t={}, curr MB: {}, peak MB: {}\n".format(t, curr_mb, peak_mb))
