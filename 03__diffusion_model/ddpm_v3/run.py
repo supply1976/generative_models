@@ -9,7 +9,7 @@ from tensorflow.keras.callbacks import CSVLogger
 import modelDef
 from data_loader import DataLoader
 
-#tf.debugging.disable_traceback_filtering()
+tf.debugging.disable_traceback_filtering()
 
 
 def init_logging(filename, checkpoint=None):
@@ -69,6 +69,9 @@ def main():
   has_attention      = training_dict['NETWORK']['HAS_ATTENTION']
   assert len(channel_multiplier)==len(has_attention)
   widths = [first_channel * mult for mult in channel_multiplier]
+  temb_dim_scale = 4
+  init_TimeMLP = True
+
   # hyper-parameters
   epochs        = training_dict['HYPER_PARAMETERS']['EPOCHS']
   batch_size    = training_dict['HYPER_PARAMETERS']['BATCH_SIZE']
@@ -97,6 +100,8 @@ def main():
     norm_groups    = norm_groups,
     activation_fn  = keras.activations.swish,
     block_size     = block_size,
+    temb_dim_scale = temb_dim_scale,
+    init_TimeMLP   = init_TimeMLP,
     )
   
   ema_network = modelDef.build_model(
@@ -108,6 +113,8 @@ def main():
     norm_groups    = norm_groups,
     activation_fn  = keras.activations.swish,
     block_size     = block_size,
+    temb_dim_scale = temb_dim_scale,
+    init_TimeMLP   = init_TimeMLP,
     )
 
   network.summary()
@@ -226,7 +233,7 @@ def main():
     assert h==input_image_size
     
     callback_save_ema_latest = keras.callbacks.LambdaCallback(
-      on_epoch_end=lambda epoch,logs: ddpm.save_model(epoch, savedir=logging_dir))
+      on_epoch_end=lambda epoch, logs: ddpm.save_model(epoch, savedir=logging_dir))
     callback_genimages = keras.callbacks.LambdaCallback(
       on_train_end=ddpm.generate_images)
     

@@ -6,7 +6,8 @@ from tensorflow import keras
 import tqdm
 import gc
 
-#tf.debugging.disable_traceback_filtering()
+tf.debugging.disable_traceback_filtering()
+
 #tf.config.set_visible_devices([], 'GPU')
 #tf.config.set_visible_devices([], 'CPU')
 #tf.config.set_logical_device_configuration(
@@ -214,21 +215,60 @@ def kernel_init(scale):
   return keras.initializers.VarianceScaling(scale, mode="fan_avg", distribution="uniform")
 
 
-
-
 class TimeEmbedding(keras.layers.Layer):
+  """
+  A custom Keras layer for generating sinusoidal time embeddings.
+  Args:
+    dim (int): The dimensionality of the time embedding vector.
+    **kwargs: Additional keyword arguments for the parent class.
+  """
   def __init__(self, dim, **kwargs):
     super().__init__(**kwargs)
+    if dim <=0 or dim % 2 != 0:
+      raise ValueError("`dim` must be a positive even integer.")
     self.dim = dim
     self.half_dim = dim // 2
-    self.emb = math.log(10000) / (self.half_dim - 1)
-    self.emb = tf.exp(tf.range(self.half_dim, dtype=tf.float32) * -self.emb)
-
+    self.emb = tf.exp(
+      tf.range(self.half_dim, dtype=tf.float32) * 
+      -(tf.math.log(10000.0) / (self.half_dim - 1))
+    )
+    
   def call(self, inputs):
+    """
+    Computes the sinusoidal time embedding for the input tensor.
+    Args:
+      inuts (tf.Tensor): The input tensor of shape (batch_size,).
+    Returns:
+      tf.Tensor: The sinusoidal time embedding of shape (batch_size, dim).
+    """
     inputs = tf.cast(inputs, dtype=tf.float32)
+    if len(inputs.shape) != 1:
+      raise ValueError("Input tensor must be 1D.")
+    
     emb = inputs[:, None] * self.emb[None, :]
     emb = tf.concat([tf.sin(emb), tf.cos(emb)], axis=-1)
     return emb
+  
+  def get_config(self):
+    """
+    Returns the configuration of the layer for serialization.
+    """
+    config = super().get_config()
+    config.update({
+      "dim": self.dim,
+      "half_dim": self.half_dim,
+    })
+  
+  @classmethod
+  def from_config(cls, config):
+    """
+    Creates a layer from its configuration.
+    Args:
+      config (dict): The configuration dictionary.
+    Returns:
+      TimeEmbedding: The TimeEmbedding layer instance.
+    """
+    return cls(**config)
 
 
 class SpaceToDepthLayer(keras.layers.Layer):
@@ -239,6 +279,17 @@ class SpaceToDepthLayer(keras.layers.Layer):
   def call(self, inputs):
     return tf.nn.space_to_depth(inputs, self.block_size)
 
+  def get_config(self):
+    config = super().get_config()
+    config.update({
+      "block_size": self.block_size,
+    })
+    return config
+  
+  @classmethod
+  def from_config(cls, config):
+    return cls(**config)
+
 
 class DepthToSpaceLayer(keras.layers.Layer):
   def __init__(self, block_size, **kwargs):
@@ -247,9 +298,21 @@ class DepthToSpaceLayer(keras.layers.Layer):
 
   def call(self, inputs):
     return tf.nn.depth_to_space(inputs, self.block_size)
+  
+  def get_config(self):
+    config = super().get_config()
+    config.update({
+      "block_size": self.block_size,
+    })
+    return config
+  
+  @classmethod
+  def from_config(cls, config):
+    return cls(**config)
+  
 
 
-def ResidualBlock(width, groups=32, activation_fn=keras.activations.swish):
+def ResidualBlock(width, attention, num_heads, groups, activation_fn=keras.activations.swish):
   def apply(inputs):
     x, t = inputs
     input_width = x.shape[3]
@@ -280,6 +343,13 @@ def ResidualBlock(width, groups=32, activation_fn=keras.activations.swish):
       kernel_initializer=kernel_init(0.0),
       )(x)
     x = keras.layers.Add()([x, residual])
+    # check attention
+    if attention:
+      res_output = x
+      x = keras.layers.GroupNormalization(groups=norm_groups)(x)
+      x = keras.layers.MultiHeadAttention(
+        num_heads=num_heads, key_dim=widths[i], attention_axes=(1,2))(x,x)
+      x = keras.layers.Add()([x, res_output])
     return x
   return apply
 
@@ -328,27 +398,69 @@ def build_model(
   interpolation="nearest",
   activation_fn=keras.activations.swish,
   block_size=1,
+  temb_dim_scale=1,
+  init_TimeMLP=False,
+  #kernel_init=kernel_init,
   ):
-  #
+  """
+    Build UNet model
+    image_size: int, size of input image
+    image_channel: int, number of channels of input image
+    widths: list of int, width of each block
+    has_attention: list of bool, whether to use attention in each block
+    num_heads: int, number of heads for attention
+    num_res_blocks: int, number of residual blocks in each block
+    norm_groups: int, number of groups for normalization
+    interpolation: str, interpolation method for upsampling
+    activation_fn: activation function for the model
+  """
+  # Check the input parameters
+  if not isinstance(image_size, int) or image_size <= 0:
+    raise ValueError("`image_size` must be a positive integer.")
+  if not isinstance(image_channel, int) or image_channel <= 0:
+    raise ValueError("`image_channel` must be a positive integer.")
+  if not isinstance(widths, list) or len(widths) == 0:
+    raise ValueError("`widths` must be a non-empty list of integers.")
+  if not all(isinstance(w, int) and w > 0 for w in widths):
+    raise ValueError("All elements in `widths` must be positive integers.")
+  if not isinstance(has_attention, list) or len(has_attention) != len(widths):
+    raise ValueError("`has_attention` must be a list of booleans with the same length as `widths`.")
+  if not all(isinstance(h, bool) for h in has_attention):
+    raise ValueError("All elements in `has_attention` must be booleans.")
+  if not isinstance(num_heads, int) or num_heads <= 0:
+    raise ValueError("`num_heads` must be a positive integer.")
+  if not isinstance(num_res_blocks, int) or num_res_blocks <= 0:
+    raise ValueError("`num_res_blocks` must be a positive integer.")
+  if not isinstance(norm_groups, int) or norm_groups <= 0:
+    raise ValueError("`norm_groups` must be a positive integer.")
+  if not isinstance(interpolation, str):
+    raise ValueError("`interpolation` must be a string.")
+  if not isinstance(block_size, int) or block_size <= 0:
+    raise ValueError("`block_size` must be a positive integer.")
+  if not isinstance(temb_dim_scale, int) or temb_dim_scale <= 0:
+    raise ValueError("`temb_dim_scale` must be a positive integer.")
+  if not isinstance(init_TimeMLP, bool):
+    raise ValueError("`init_TimeMLP` must be a boolean.")
   input_shape = (image_size, image_size, image_channel)
   image_input = keras.Input(shape=input_shape, name="image_input")
   time_input = keras.Input(shape=(), dtype=tf.int64, name="time_input")
-
+  
   if block_size >1 :
     assert image_size%block_size==0
     x = SpaceToDepthLayer(block_size)(image_input)
   else:
     x = image_input
-
+  
   x = keras.layers.Conv2D(
     widths[0],
     kernel_size=(3, 3),
     padding="same",
     kernel_initializer=kernel_init(1.0),
     )(x)
-
-  temb = TimeEmbedding(dim=widths[0] * 4)(time_input)
-  temb = TimeMLP(units=widths[0] * 4, activation_fn=activation_fn)(temb)
+  
+  temb = TimeEmbedding(dim=widths[0]*temb_dim_scale)(time_input)
+  if init_TimeMLP:
+    temb = TimeMLP(units=widths[0]*temb_dim_scale, activation_fn=activation_fn)(temb)
 
   skips = [x]
 
@@ -356,13 +468,8 @@ def build_model(
   for i in range(len(widths)):
     for _ in range(num_res_blocks):
       x = ResidualBlock(
-        widths[i], groups=norm_groups, activation_fn=activation_fn)([x, temb])
-      if has_attention[i]:
-        residual = x
-        x = keras.layers.GroupNormalization(groups=norm_groups)(x)
-        x = keras.layers.MultiHeadAttention(
-          num_heads=num_heads, key_dim=widths[i], attention_axes=(1,2))(x,x)
-        x = keras.layers.Add()([x, residual])
+        widths[i], has_attention[i], num_heads=num_heads, 
+        groups=norm_groups, activation_fn=activation_fn)([x, temb])
       skips.append(x)
 
     if i != len(widths)-1:
@@ -371,29 +478,19 @@ def build_model(
 
   # MiddleBlock
   x = ResidualBlock(
-    widths[-1], groups=norm_groups, activation_fn=activation_fn)([x, temb])
-  if has_attention[-1]:
-    residual = x
-    x = keras.layers.GroupNormalization(groups=norm_groups)(x)
-    x = keras.layers.MultiHeadAttention(
-      num_heads=num_heads, key_dim=widths[i], attention_axes=(1,2))(x,x)
-    x = keras.layers.Add()([x, residual])
+    widths[-1], has_attention[-1], num_heads=num_heads,
+    groups=norm_groups, activation_fn=activation_fn)([x, temb])
   
   x = ResidualBlock(
-    widths[-1], groups=norm_groups, activation_fn=activation_fn)([x, temb])
+    widths[-1], has_attention[-1], num_heads=num_heads,
+    groups=norm_groups, activation_fn=activation_fn)([x, temb])
 
   # UpBlock
   for i in reversed(range(len(widths))):
     for _ in range(num_res_blocks + 1):
       x = keras.layers.Concatenate(axis=-1)([x, skips.pop()])
-      x = ResidualBlock(widths[i], 
+      x = ResidualBlock(widths[i], has_attention[i], num_heads=num_heads, 
         groups=norm_groups, activation_fn=activation_fn)([x, temb])
-      if has_attention[i]:
-        residual = x
-        x = keras.layers.GroupNormalization(groups=norm_groups)(x)
-        x = keras.layers.MultiHeadAttention(
-          num_heads=num_heads, key_dim=widths[i], attention_axes=(1,2))(x,x)
-        x = keras.layers.Add()([x, residual])
     
     if i != 0:
       x = UpSample(widths[i], interpolation=interpolation)(x)
@@ -405,6 +502,7 @@ def build_model(
     kernel_initializer=kernel_init(0.0),
     name="final_conv2d",
     )(x)
+  
   if block_size>1:
     x = DepthToSpaceLayer(block_size)(x)
   return keras.Model([image_input, time_input], x, name="unet")
@@ -422,7 +520,9 @@ class DiffusionModel(keras.Model):
     self.noise_loss_tracker = keras.metrics.Mean(name="n_loss")
     self.image_loss_tracker = keras.metrics.Mean(name="i_loss")
     self.velocity_loss_tracker = keras.metrics.Mean(name="v_loss")
-    assert self.diff_util.pred_type is not None
+    assert self.diff_util.pred_type in ['noise', 'image', 'velocity'], \
+      "pred_type must be one of [noise, image, velocity]"
+
 
   @property
   def metrics(self):
@@ -432,12 +532,14 @@ class DiffusionModel(keras.Model):
             self.velocity_loss_tracker,
             ]
 
+  @tf.function
   def train_step(self, images):
     batch_size = tf.shape(images)[0]
     # Random sample timesteps uniformly, t is time index tensor
-    t = tf.random.uniform(minval=1, maxval=self.timesteps+1, 
-      shape=(batch_size,), dtype=tf.int64)
-
+    t = tf.random.uniform(
+      minval=1, maxval=self.timesteps+1, shape=(batch_size,), dtype=tf.int64
+    )
+    
     with tf.GradientTape() as tape:
       # Sample random noise to be added to the images in the batch
       noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
@@ -459,25 +561,31 @@ class DiffusionModel(keras.Model):
       elif self.diff_util.pred_type=='velocity':
         loss = velocity_loss
       else:
-        loss = None
+        raise ValueError("pred_type must be one of [noise, image, velocity]")
 
-    # Get the gradients
+    # Get the gradients of the loss with respect to the model's trainable weights
+    # update the weights of the network
     gradients = tape.gradient(loss, self.network.trainable_weights)
-
-    # Update the weights of the network
     self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
+    # Update EMA weights
+    self._update_ema_weights()
+
+    # Update metrics
     self.loss_tracker.update_state(loss)
     self.noise_loss_tracker.update_state(noise_loss)
     self.image_loss_tracker.update_state(image_loss)
     self.velocity_loss_tracker.update_state(velocity_loss)
 
-    # Updates the weight values for the network with EMA weights
-    for weight, ema_weight in zip(self.network.weights, self.ema_network.weights):
-      ema_weight.assign(self.ema * ema_weight + (1 - self.ema) * weight)
-
     # Return loss values
     return {m.name: m.result() for m in self.metrics}
 
+  @tf.function
+  def _update_ema_weights(self):
+    # Update the EMA weights of the model
+    for ema_weight, weight in zip(self.ema_network.trainable_weights, self.network.trainable_weights):
+      ema_weight.assign(ema_weight * self.ema + (1 - self.ema) * weight)
+
+  @tf.function  
   def test_step(self, images):
     batch_size = tf.shape(images)[0]
     t = tf.random.uniform(minval=1, maxval=self.timesteps+1, 
@@ -511,12 +619,61 @@ class DiffusionModel(keras.Model):
 
     return {m.name: m.result() for m in self.metrics}
 
-  def save_model(self, epoch, logs=None, savedir=None):
-    epo = str(epoch).zfill(5)
-    if epoch%1000==0 and epoch>0:
-      self.ema_network.save_weights(os.path.join(savedir, f"ema_epoch_{epo}.weights.h5"))
-    self.ema_network.save_weights(os.path.join(savedir, "ema_latest.weights.h5"))
+  def save_model(self, epoch, logs='mylog.txt', savedir=None):
+    if savedir is None:
+      savedir = './saved_models'
+    # Ensure the save directory exists
+    os.makedirs(savedir, exist_ok=True)
 
+    epo = str(epoch).zfill(5)
+    
+    # Trace the EMA network with sample input
+    sample_input_x, sample_input_t = self.network.inputs
+    sample_input = tf.random.normal([1]+list(sample_input_x.shape[1:]))
+    sample_input_t = tf.constant([1], dtype=tf.int64)
+    _ = self.ema_network([sample_input_x, sample_input_t], training=False)
+
+    if epoch%1000==0 and epoch>0:
+      ema_weights_path = os.path.join(savedir, f"ema_epoch_{epo}.weights.h5")
+      self.ema_network.save_weights(ema_weights_path)
+      #print("save ema weights to {}".format(ema_weights_path))
+      
+      # Save the full model in .pb format (SavedModel format)
+      #pb_path = os.path.join(savedir, f"model_epoch_{epo}_pb")
+      #try:
+      #  tf.keras.models.save_model(self.ema_network, pb_path, save_format='tf')
+      #except Exception as e:
+      #  print(f"Error saving model in .pb format: {e}")
+      #print(f"Model saved in .pb format to {pb_path}")
+      
+      # Save the model as a frozen graph
+      #frozen_graph_path = os.path.join(savedir, f"frozen_model_epoch_{epo}.pb")
+      #self._save_frozen_graph(frozen_graph_path)
+      #print(f"Frozen graph saved to {frozen_graph_path}")   
+    
+    # Save the latest EMA weights
+    ema_latest_path = os.path.join(savedir, "ema_latest.weights.h5")
+    self.ema_network.save_weights(ema_latest_path)
+    #print(f"EMA latest weights saved to {ema_latest_path}")
+
+  @tf.function
+  def _save_frozen_graph(self, frozen_graph_path):
+    # Get the concrete function from the model
+    concrete_func = self.network.signatures.get("serving_default")
+    if concrete_func is None:
+        # If no signature is defined, create one
+        concrete_func = self.network.__call__.get_concrete_function(
+            tf.TensorSpec(self.network.inputs[0].shape, self.network.inputs[0].dtype)
+        )
+
+    # Convert the concrete function to a frozen graph
+    frozen_func = tf.graph_util.convert_variables_to_constants_v2(concrete_func)
+    frozen_graph_def = frozen_func.graph.as_graph_def()
+
+    # Save the frozen graph to a .pb file
+    with tf.io.gfile.GFile(frozen_graph_path, "wb") as f:
+        f.write(frozen_graph_def.SerializeToString())
+  
   def generate_images(self, epoch=None, logs=None, 
     savedir='./', num_images=10, clip_denoise=False, 
     gen_inputs=None, export_interm=False,
