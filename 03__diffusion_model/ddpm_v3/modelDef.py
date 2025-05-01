@@ -312,7 +312,10 @@ class DepthToSpaceLayer(keras.layers.Layer):
   
 
 
-def ResidualBlock(width, attention, num_heads, groups, activation_fn=keras.activations.swish):
+def ResidualBlock(
+    width, attention, num_heads, groups, 
+    activation_fn=keras.activations.swish,
+    ):
   def apply(inputs):
     x, t = inputs
     input_width = x.shape[3]
@@ -346,9 +349,9 @@ def ResidualBlock(width, attention, num_heads, groups, activation_fn=keras.activ
     # check attention
     if attention:
       res_output = x
-      x = keras.layers.GroupNormalization(groups=norm_groups)(x)
+      x = keras.layers.GroupNormalization(groups=groups)(x)
       x = keras.layers.MultiHeadAttention(
-        num_heads=num_heads, key_dim=widths[i], attention_axes=(1,2))(x,x)
+        num_heads=num_heads, key_dim=width, attention_axes=(1,2))(x,x)
       x = keras.layers.Add()([x, res_output])
     return x
   return apply
@@ -398,8 +401,7 @@ def build_model(
   interpolation="nearest",
   activation_fn=keras.activations.swish,
   block_size=1,
-  temb_dim_scale=1,
-  init_TimeMLP=False,
+  temb_dim=128,
   #kernel_init=kernel_init,
   ):
   """
@@ -437,10 +439,9 @@ def build_model(
     raise ValueError("`interpolation` must be a string.")
   if not isinstance(block_size, int) or block_size <= 0:
     raise ValueError("`block_size` must be a positive integer.")
-  if not isinstance(temb_dim_scale, int) or temb_dim_scale <= 0:
-    raise ValueError("`temb_dim_scale` must be a positive integer.")
-  if not isinstance(init_TimeMLP, bool):
-    raise ValueError("`init_TimeMLP` must be a boolean.")
+  if not isinstance(temb_dim, int) or temb_dim <= 0:
+    raise ValueError("`temb_dim` must be a positive integer.")
+
   input_shape = (image_size, image_size, image_channel)
   image_input = keras.Input(shape=input_shape, name="image_input")
   time_input = keras.Input(shape=(), dtype=tf.int64, name="time_input")
@@ -458,9 +459,8 @@ def build_model(
     kernel_initializer=kernel_init(1.0),
     )(x)
   
-  temb = TimeEmbedding(dim=widths[0]*temb_dim_scale)(time_input)
-  if init_TimeMLP:
-    temb = TimeMLP(units=widths[0]*temb_dim_scale, activation_fn=activation_fn)(temb)
+  temb = TimeEmbedding(dim=temb_dim)(time_input)
+  temb = TimeMLP(units=temb_dim, activation_fn=activation_fn)(temb)
 
   skips = [x]
 
@@ -482,7 +482,7 @@ def build_model(
     groups=norm_groups, activation_fn=activation_fn)([x, temb])
   
   x = ResidualBlock(
-    widths[-1], has_attention[-1], num_heads=num_heads,
+    widths[-1], False, num_heads=num_heads,
     groups=norm_groups, activation_fn=activation_fn)([x, temb])
 
   # UpBlock
@@ -628,10 +628,10 @@ class DiffusionModel(keras.Model):
     epo = str(epoch).zfill(5)
     
     # Trace the EMA network with sample input
-    sample_input_x, sample_input_t = self.network.inputs
-    sample_input = tf.random.normal([1]+list(sample_input_x.shape[1:]))
-    sample_input_t = tf.constant([1], dtype=tf.int64)
-    _ = self.ema_network([sample_input_x, sample_input_t], training=False)
+    #sample_input_x, sample_input_t = self.network.inputs
+    #sample_input = tf.random.normal([1]+list(sample_input_x.shape[1:]))
+    #sample_input_t = tf.constant([1], dtype=tf.int64)
+    #_ = self.ema_network([sample_input_x, sample_input_t], training=False)
 
     if epoch%1000==0 and epoch>0:
       ema_weights_path = os.path.join(savedir, f"ema_epoch_{epo}.weights.h5")

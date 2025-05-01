@@ -69,8 +69,7 @@ def main():
   has_attention      = training_dict['NETWORK']['HAS_ATTENTION']
   assert len(channel_multiplier)==len(has_attention)
   widths = [first_channel * mult for mult in channel_multiplier]
-  temb_dim_scale = 4
-  init_TimeMLP = True
+  temb_dim           = training_dict['NETWORK']['TIME_EMB_DIM']
 
   # hyper-parameters
   epochs        = training_dict['HYPER_PARAMETERS']['EPOCHS']
@@ -100,8 +99,7 @@ def main():
     norm_groups    = norm_groups,
     activation_fn  = keras.activations.swish,
     block_size     = block_size,
-    temb_dim_scale = temb_dim_scale,
-    init_TimeMLP   = init_TimeMLP,
+    temb_dim       = temb_dim,
     )
   
   ema_network = modelDef.build_model(
@@ -113,8 +111,7 @@ def main():
     norm_groups    = norm_groups,
     activation_fn  = keras.activations.swish,
     block_size     = block_size,
-    temb_dim_scale = temb_dim_scale,
-    init_TimeMLP   = init_TimeMLP,
+    temb_dim       = temb_dim,
     )
 
   network.summary()
