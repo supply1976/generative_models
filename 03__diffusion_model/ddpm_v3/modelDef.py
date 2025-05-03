@@ -706,9 +706,12 @@ class DiffusionModel(keras.Model):
     #   tf.range(1000, 0, -10) = [1000, 990, 980, ...,30,20,10]
     #   xs = x_{t-10}
     #   total = 100 iterations
+    
+    d_output = {}
     mem_log = open(os.path.join(savedir, "mem.log"), 'w') 
     reverse_timeindex = np.arange(self.timesteps, 0, -self.diff_util.reverse_stride)
     assert reverse_timeindex.dtype=='int64'
+
     for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
       tt = tf.fill(n_imgs, t)
       y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
@@ -740,24 +743,36 @@ class DiffusionModel(keras.Model):
       peak_mb = mem['peak'] / (1024**2)
       mem_log.writelines("t={}, curr MB: {}, peak MB: {}\n".format(t, curr_mb, peak_mb))
       
-      if export_interm and t.numpy()%10==0:
-        output_fn = os.path.join(savedir, "img_t_"+str(t.numpy()))
-        if not clip_denoise:
-          output_fn = output_fn+"_raw"
-        np.savez_compressed(output_fn, images=samples.numpy())
+      if export_interm and t%10==0:
+        temp_key = "images_t_"+str(t)
+        temp_t_images = samples.numpy()
+        temp_t_images = np.clip(temp_t_images, -1, 1)
+        temp_t_images = 0.5 * (temp_t_images+1)
+        # Chop
+        temp_t_images[temp_t_images < 0.01] = 0
+        temp_t_images[temp_t_images > 0.99] = 1
+        d_output[temp_key] = temp_t_images
     
     mem_log.close()
+
+    # de-normalisze the output range to (0, 1)
+    output_images = samples.numpy()
+    output_images = np.clip(output_images, -1, 1)
+    output_images = 0.5 * (output_images+1)
+    # Chop
+    output_images[output_images < 0.01] = 0
+    output_images[output_images > 0.99] = 1
+
     # 3. Return generated samples
     ss = "x".join(list(map(str, samples.numpy().shape)))
     output_fn = "ddim_eta"+str(self.diff_util.ddim_eta)+"_gen_"+ss
     if not clip_denoise:
       output_fn = output_fn + "_raw"
     output_fn = os.path.join(savedir, output_fn)
-    d={}
-    d['images']=samples
-    np.savez_compressed(output_fn, **d)
+    d_output['images']=output_images
+    np.savez_compressed(output_fn, **d_output)
     print("Images Generation Done, save to {}".format(output_fn))
-    return samples
+    return None
 
 
 if __name__=="__main__":
