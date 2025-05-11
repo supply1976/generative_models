@@ -30,7 +30,7 @@ def main():
   sigma = 0.02
   print("#"*80)
   cols = ["KLD_gimg", "KLD_psd", "FID_inceptV3", 
-    "net", 'scheduler', "loss", "pred", "steps", 
+    "net", 'scheduler', "loss", "pred", "steps", 'imgen_epoch',
     "clipDN", "gen_date", "batch", "repeat", "LR",
     'attentions', 'num_heads',
     ]
@@ -42,6 +42,14 @@ def main():
     print(pdir)
     rev_steps, gen_date = (os.path.basename(pdir)).split("_")[1:]
     yaml_fn = os.path.join(ppdir, "training_config.yaml")
+    
+    with open(os.path.join(pdir, "imgen.log"), 'r') as f_imlog:
+      imgen_log = f_imlog.readlines()
+    imgen_log = [_.strip() for _ in imgen_log]
+    imgen_model = os.path.basename(imgen_log[0].split(":")[-1])
+    imgen_model = imgen_model.split(".")[0]
+    imgen_epoch = imgen_model.split("_")[-1]
+
     with open(yaml_fn, 'r') as f:
       yaml_dict = yaml.safe_load(f)
     dsrept = yaml_dict['DATASET']['REPEAT']
@@ -73,7 +81,7 @@ def main():
       clipDN = 1
     tr_cond = [
       nn_code, sch, loss_fn, pred_type, 
-      rev_steps, clipDN, gen_date, batch, 
+      rev_steps, imgen_epoch, clipDN, gen_date, batch, 
       dsrept, lr, atts, nhs]
     # get features
     gimgSE_gen_feats, psdSE_gen_feats, inceptV3_gen_feats = read_features(csv)
