@@ -676,7 +676,7 @@ class DiffusionModel(keras.Model):
   
   def generate_images(self, epoch=None, logs=None, 
     savedir='./', num_images=10, clip_denoise=False, 
-    gen_inputs=None, export_interm=False,
+    gen_inputs=None, _freeze_ini=False, export_interm=False,
     ):
     #
     img_input, _ = self.network.inputs
@@ -687,14 +687,17 @@ class DiffusionModel(keras.Model):
       # Randomly sample noise (starting point for reverse process)
       _shape = (num_images, img_size, img_size, img_channel)
       samples = tf.random.normal(shape=_shape, dtype=tf.float32)
-      # samples = np.random.randn(*_shape).astype(np.float32)
+      #samples = np.random.randn(*_shape).astype(np.float32)
     else:
-      # should be tensor
       samples = gen_inputs
 
-    n_imgs, _, _, _ = samples.shape
+    n_imgs, _h, _w, _ = samples.shape
     print("generating {} images ...".format(n_imgs))
-
+    
+    if _freeze_ini:
+      ini_samples = tf.identity(samples)
+      ini_samples = ini_samples.numpy()
+    
     # Sample from the model iteratively
     #
     # Ex.1: reverse_stride=1, reverse sampling on every steps,
@@ -723,8 +726,13 @@ class DiffusionModel(keras.Model):
       pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(
         pred_image, samples, tt, pred_noise=pred_noise,
         )
-      
       samples = self.diff_util.p_sample(pred_mean, pred_sigma)
+      
+      if _freeze_ini:
+        samples = samples.numpy()
+        samples[:, 0:_h//2, 0:_w//2, :] = ini_samples[:,0:_h//2,0:_w//2,:]
+        samples = tf.convert_to_tensor(samples)
+      
       del pred_mean
       del pred_sigma
       del pred_noise

@@ -84,6 +84,9 @@ def main():
   gen_output_dir   = imgen_dict['GEN_OUTPUT_DIR']
   ddim_eta         = imgen_dict['DDIM_ETA']
   random_seed      = imgen_dict['RANDOM_SEED']
+  if "_FREEZE_INI" not in imgen_dict.keys():
+    imgen_dict['_FREEZE_INI'] = False
+  _freeze_ini      = imgen_dict['_FREEZE_INI']
 
   # GPU devices
   gpus = tf.config.list_physical_devices("GPU")
@@ -352,16 +355,29 @@ def main():
         zlist.append(tf.random.normal(shape=_shape, dtype=tf.float32))
       gen_inputs = tf.concat(zlist, axis=0)
     
+    elif gen_inputs=="_freeze_ini":
+      images = np.load("/remote/ltg_proj02_us01/user/richwu/datasets_for_ML_prototypes/metal_test1/pitch_8_512x512x1/all_images_713x512x512x1.npz")['images']
+      images = 2*images -1.0
+      images = images[0:10]
+      n, h, w, c = images.shape
+      noises = tf.random.normal(shape=images.shape, dtype=tf.float32)
+      noises = noises.numpy()
+      noises[:, 0:h//2, 0:h//2, :] = images[:, 0:h//2, 0:w//2, :]
+      gen_inputs = noises
+
     else:
       return
 
     clip_denoise = True if FLAGS.clip_denoise else False
 
     t0 = time.time()
+
+    
     ddpm.generate_images(
       num_images=num_gen_images, 
       savedir=gen_dir,
       gen_inputs=gen_inputs,
+      _freeze_ini=_freeze_ini,
       clip_denoise=clip_denoise,
       export_interm=export_interm)
     #

@@ -1,9 +1,11 @@
 import os, sys, argparse
+import gzip
 import numpy as np
 import pandas as pd
 import scipy.stats as sps
 from scipy.linalg import sqrtm
 from scipy import fftpack
+from skimage.metrics import structural_similarity as ssim
 import itertools
 import tensorflow as tf
 from tensorflow import keras
@@ -44,6 +46,31 @@ def load_npz_data(npzfile, rescale_to_01=True):
   return images
 
 
+def lempel_ziv_complexity_fast(binary_sequence):
+  """
+  Fast Lempel-Ziv Complexity for a 1D binary sequence.
+  Input: binary_sequence (1D numpy array or list of 0s and 1s)
+  Output: LZC (int)
+  """
+  s = ''.join(str(int(b)) for b in binary_sequence)
+  n = len(s)
+  i, lzc = 0, 1
+  substrings = set()
+  k = 1
+  while i + k <= n:
+    substr = s[i:i+k]
+    if substr not in substrings:
+      lzc += 1
+      substrings.add(substr)
+      i += k
+      k = 1
+    else:
+      k += 1
+      if i + k > n:
+        break
+  return lzc
+
+
 class PatternMetrics:
   def __init__(self, images, pitch=None):
     # images range by default is (0, 1)
@@ -54,13 +81,19 @@ class PatternMetrics:
       self.pitch = pitch
     self.nums, self.h, self.w, self.c = images.shape
     assert self.h==self.w
-    
-  def calc_grad_img_SE2D(self, channel_id=0):
+
+
+  def calc_grad_img_entropy(self, nbits=1, channel_id=0):
     # Shannon entropy of gradient image
-    print("calculating gradient image SE 2D")
+    print("calculating gradient image Shannon entropy")
     images = self.images[:, :, :, channel_id]
-    # convert to 4-bit image (0 ~ 15)
-    images = (images*15).astype(np.uint8)
+    assert nbits >= 1
+    max_val = 2**nbits -1
+    if nbits==1:
+      images = (images > 0.5).astype(np.uint8)
+    else:
+      images = (images * max_val).astype(np.uint8)
+    # calc gradient images
     fy, fx = np.gradient(images, axis=(1,2))
     assert len(fx.shape)==3
     assert len(fy.shape)==3
@@ -68,37 +101,54 @@ class PatternMetrics:
     fx = fx[:, 1:-1, 1:-1]
     fy = fy[:, 1:-1, 1:-1]
     # histogram counts
-    pdf_fx = np.array([np.histogram(_, bins=31)[0] for _ in fx])
-    pdf_fy = np.array([np.histogram(_, bins=31)[0] for _ in fy])
+    fx_hists, fy_hists = ([], [])
+    for i in range(fx.shape[0]):
+      fx_val, fx_count = np.unique(fx[i], return_counts=True)
+      fy_val, fy_count = np.unique(fy[i], return_counts=True)
+      assert len(fx_count) <= (max_val*2+1)
+      assert len(fy_count) <= (max_val*2+1)
+      # append 0 to make the total length equal to max_val*2+1
+      if len(fx_count)<max_val*2+1:
+        fx_count = np.insert(fx_count, 0, [0]*(max_val*2+1 - len(fx_count)))
+      if len(fy_count)<max_val*2+1:
+        fy_count = np.insert(fy_count, 0, [0]*(max_val*2+1 - len(fy_count)))
+      #
+      fx_hists.append(fx_count)
+      fy_hists.append(fy_count)
+    # get all gradient image histograms
+    fx_hists = np.stack(fx_hists, axis=0)
+    fy_hists = np.stack(fy_hists, axis=0)
+    print(fx_hists.shape)
     # calc Shannon Entropy
-    H_fx = sps.entropy(pk=pdf_fx, axis=1)
-    H_fy = sps.entropy(pk=pdf_fy, axis=1)
+    H_fx = sps.entropy(pk=fx_hists, axis=1)
+    H_fy = sps.entropy(pk=fy_hists, axis=1)
+
     features = np.stack([H_fx, H_fy], axis=-1)
     return features
 
-  def calc_PSD(self, channel_id=0, fft_pad=0, remove_dc=True):
+
+  def calc_PSD(self, channel_id=0, fft_pad=0):
     """
     Calculate power spectrum density (PSD) using fft2 (by definition)
     """
     print("calculating PSD")
     images = self.images[:,:,:, channel_id]
-    print("images range", images.max(), images.min())
+    # normalize to volumn = 0 (remove dc)
+    images = images - images.mean(axis=(1,2))[:, None, None]
+    print("images range, remove dc", images.max(), images.min(), images.mean())
+
     n = self.w + fft_pad
     self.freqs = fftpack.fftfreq(n, d=self.pitch)
     self.freqs = fftpack.fftshift(self.freqs)
     z = fftpack.fft2(images, shape=(n,n))
-    #dc = np.real(z[:,0,0])
-    # remove dc
-    if remove_dc:
-      z[:,0,0]=1.0e-6
-    z = fftpack.fftshift(z, axes=(-2,-1))
-    psd = np.abs(z)
+    z = fftpack.fftshift(z, axes=(1,2))
+    psd = np.abs(z)**2
     self.kx, self.ky = np.meshgrid(self.freqs, self.freqs)
     # normalization
-    psd = psd / np.sum(psd)
     return psd
-    
-  def calc_psd_SE2D(self, psd):
+
+
+  def calc_fftPSD_SE2D(self, psd):
     """
     Calculate 2D Shannon Entropy in freq. domain, NOT in image space domain
     using scipy.stats.entropy()
@@ -135,6 +185,7 @@ class PatternMetrics:
     features = np.stack([S0, S0x, S0y], axis=-1)
     return features
 
+
   def calc_inceptionV3_features(self, model):
     print("calculating inceptionV3 model features")
     n, h, w, c = self.images.shape
@@ -148,22 +199,42 @@ class PatternMetrics:
     return features
 
 
-def save_features(PM, inceptionV3_model, save_dir, output_fn, save_psd):
-  grad_img_SE2D_feats = PM.calc_grad_img_SE2D()
-  psd = PM.calc_PSD()
-  psd_SE2D_feats = PM.calc_psd_SE2D(psd)
-  inceptV3_feats = PM.calc_inceptionV3_features(inceptionV3_model)
+  def calc_LZCxy_Pden_gzipSize(self, channel_id=0):
+    images = self.images[:, :, :, channel_id]
+    pdens = images.mean(axis=(1,2))
+    # use binary images to calculate LZC
+    images_bin = (self.images[:, :, :, channel_id] > 0.5).astype(np.uint8)
+    lzc_x_vals, lzc_y_vals, comp_sizes = ([], [], [])
+    for img in images_bin:
+      lzc_x = lempel_ziv_complexity_fast(img.flatten())
+      lzc_y = lempel_ziv_complexity_fast(img.T.flatten())
+      compressed_size = len(gzip.compress(img.flatten()))
+      lzc_x_vals.append(lzc_x)
+      lzc_y_vals.append(lzc_y)
+      comp_sizes.append(compressed_size)
+    features = np.stack([lzc_x_vals, lzc_y_vals, pdens, comp_sizes], axis=-1)
+    return features
 
-  df1 = pd.DataFrame(grad_img_SE2D_feats, columns=['Hx', 'Hy'])
-  df2 = pd.DataFrame(psd_SE2D_feats, columns=['S0', 'S0x', 'S0y'])
-  df3 = pd.DataFrame(inceptV3_feats, 
+
+def save_features(PM, channel_id, inceptionV3_model, save_dir, output_fn):
+  feats_grad_img_H = PM.calc_grad_img_entropy(nbits=1, channel_id=channel_id)
+  psd = PM.calc_PSD(channel_id=channel_id)
+  feats_fftPSD_SE2D = PM.calc_fftPSD_SE2D(psd)
+  feats_inceptV3 = PM.calc_inceptionV3_features(inceptionV3_model)
+  feats_LZC_Pden_gzipSize = PM.calc_LZCxy_Pden_gzipSize(channel_id=channel_id)
+
+  
+  df1 = pd.DataFrame(feats_grad_img_H, columns=['Hx', 'Hy'])
+  df2 = pd.DataFrame(feats_fftPSD_SE2D, columns=['S0', 'S0x', 'S0y'])
+  df3 = pd.DataFrame(feats_LZC_Pden_gzipSize, 
+    columns=['LZC_x', 'LZC_y','Pden', 'gzipSize'])
+
+  df4 = pd.DataFrame(feats_inceptV3, 
     columns=["inceptV3_"+str(i) for i in range(2048)])
-  df = pd.concat([df1, df2, df3], axis=1)
+  
+  df = pd.concat([df1, df2, df3, df4], axis=1)
   df.to_csv(os.path.join(save_dir, output_fn), sep='\t', na_rep="NA", index=False)
   print(os.path.join(save_dir, output_fn), "saved")
-  print("PSD shape", psd.shape)
-  if save_psd:
-    np.savez_compressed(os.path.join(save_dir, "psd"), psd=psd)
   return df
 
 
@@ -172,7 +243,6 @@ def main():
   parser.add_argument('--real_npz', type=str, default=None)
   parser.add_argument('--workdir', type=str, default=None)
   parser.add_argument('--pitch', type=float, default=None)
-  parser.add_argument('--save_psd', action='store_true')
   FLAGS, _ = parser.parse_known_args()
   
   inceptionV3_model = load_inception_model()
@@ -185,7 +255,11 @@ def main():
     _, h, w, _ = real_images.shape 
     PM_real = PatternMetrics(real_images, pitch=FLAGS.pitch)
     df_feats_real = save_features(
-      PM_real, inceptionV3_model, save_dir, "real_features.csv", save_psd=FLAGS.save_psd)
+      PM=PM_real, 
+      channel_id=0,
+      inceptionV3_model=inceptionV3_model, 
+      save_dir=save_dir, 
+      output_fn="real_features_"+str(h)+"x"+str(w)+".csv")
     print(df_feats_real.head())
 
   if FLAGS.workdir is not None:
@@ -204,7 +278,11 @@ def main():
       gen_images = load_npz_data(npz, rescale_to_01=False)
       PM_gen = PatternMetrics(gen_images, pitch=FLAGS.pitch)
       df_feats_gen = save_features(
-        PM_gen, inceptionV3_model, save_dir, f+"_features.csv", save_psd=FLAGS.save_psd)
+        PM=PM_gen,
+        channel_id=0,
+        inceptionV3_model=inceptionV3_model,
+        save_dir=save_dir,
+        output_fn=f+"_features.csv")
       print(df_feats_gen.head())
         
 

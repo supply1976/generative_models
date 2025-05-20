@@ -11,32 +11,13 @@ mpl.rcParams['backend']='TkAgg'
 import matplotlib.pyplot as plt
 
 
-def main():
-  parser = argparse.ArgumentParser()
-  parser.add_argument('--real_csv', type=str, default=None)
-  parser.add_argument('--workdir', type=str, default=None)
-  FLAGS, _ = parser.parse_known_args()
-  assert FLAGS.real_csv is not None
-  assert FLAGS.workdir is not None
-  gimgSE_real_feats, psdSE_real_feats, inceptV3_real_feats = read_features(FLAGS.real_csv)
-
-  gen_csvs = []
-  for root, dirs, files in os.walk(FLAGS.workdir):
-    for fn in files:
-      if fn.endswith("_features.csv"):
-        csv_file = os.path.join(root, fn)
-        gen_csvs.append(csv_file)
+def create_base_df(gen_csv_files):
+  trcond_cols = ["net", 'scheduler', "loss", "pred", "steps", 'imgen_epoch',
+    "clipDN", "gen_date", "batch", "repeat", "LR", 'attentions', 'num_heads']
   
-  sigma = 0.02
-  print("#"*80)
-  cols = ["KLD_gimg", "KLD_psd", "FID_inceptV3", 
-    "net", 'scheduler', "loss", "pred", "steps", 'imgen_epoch',
-    "clipDN", "gen_date", "batch", "repeat", "LR",
-    'attentions', 'num_heads',
-    ]
-  df = pd.DataFrame(columns=cols)
+  df = pd.DataFrame(columns=trcond_cols)
 
-  for i, csv in enumerate(gen_csvs):
+  for i, csv in enumerate(gen_csv_files):
     pdir = os.path.dirname(csv)
     ppdir = os.path.dirname(pdir)
     print(pdir)
@@ -83,29 +64,117 @@ def main():
       nn_code, sch, loss_fn, pred_type, 
       rev_steps, imgen_epoch, clipDN, gen_date, batch, 
       dsrept, lr, atts, nhs]
-    # get features
-    gimgSE_gen_feats, psdSE_gen_feats, inceptV3_gen_feats = read_features(csv)
-    # calc metrics
-    kld_gimgSE = np.around(calc_KLD(gimgSE_real_feats, gimgSE_gen_feats, sigma=sigma), 2)
-    kld_psdSE = np.around(calc_KLD(psdSE_real_feats, psdSE_gen_feats, sigma=sigma), 2)
-    fid_inceptV3 = np.around(calc_FID(inceptV3_real_feats, inceptV3_gen_feats), 2)
-    print(i, csv)
-    L = [kld_gimgSE, kld_psdSE, fid_inceptV3]+tr_cond
-    df.loc[i] = L
+    df.loc[i] = tr_cond
+  return df
+
+
+def main():
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--real_csv', type=str, default=None)
+  parser.add_argument('--workdir', type=str, default=None)
+  FLAGS, _ = parser.parse_known_args()
+  assert FLAGS.real_csv is not None
+  assert FLAGS.workdir is not None
+  
+  df_real = pd.read_csv(FLAGS.real_csv, sep='\s+')
+  
+  cols_gradImgSE = ['Hx', 'Hy']
+  cols_psdSE = ['S0x', 'S0y']
+  cols_gzip = ['gzipSize', 'Pden']
+  cols_LZCxy = ['LZC_x', 'LZC_y']
+  cols_inceptV3 = [_ for _ in list(df_real) if _.startswith('inceptV3')]
+
+  feats_gradImgSE_real = df_real[cols_gradImgSE].values
+  feats_psdSE_real     = df_real[cols_psdSE].values
+  feats_gzip_real      = df_real[cols_gzip].values
+  feats_LZCxy_real     = df_real[cols_LZCxy].values
+  feats_inceptV3_real  = df_real[cols_inceptV3].values
+
+  gen_csv_files = []
+  for root, dirs, files in os.walk(FLAGS.workdir):
+    for fn in files:
+      if fn.endswith("_features.csv"):
+        csv_file = os.path.join(root, fn)
+        gen_csv_files.append(csv_file)
+  
+  print("#"*80)
+  df = create_base_df(gen_csv_files)
+  
+  values_FID=[]
+  values_KLD_gradImgSE=[]
+  values_KLD_psdSE=[]
+  values_KLD_LZC=[]
+  values_KLD_gzip=[]
+  for i, gen_csv in enumerate(gen_csv_files):
+    df_gen = pd.read_csv(gen_csv, sep='\s+')
+    feats_gradImgSE_gen = df_gen[cols_gradImgSE].values
+    feats_psdSE_gen     = df_gen[cols_psdSE].values
+    feats_gzip_gen      = df_gen[cols_gzip].values
+    feats_LZCxy_gen     = df_gen[cols_LZCxy].values
+    feats_inceptV3_gen  = df_gen[cols_inceptV3].values
+    fid_i = calc_FID(feats_inceptV3_real, feats_inceptV3_gen)
+    kld_gradImgSE = _calc_KLD_use_gaussian_kde(feats_gradImgSE_real, feats_gradImgSE_gen)
+    kld_psdSE = _calc_KLD_use_gaussian_kde(feats_psdSE_real, feats_psdSE_gen)
+    kld_LZC = _calc_KLD_use_gaussian_kde(feats_LZCxy_real, feats_LZCxy_gen)
+    kld_gzip = _calc_KLD_use_gaussian_kde(feats_gzip_real, feats_gzip_gen)
+
+    values_FID.append(fid_i)
+    values_KLD_gradImgSE.append(kld_gradImgSE)
+    values_KLD_psdSE.append(kld_psdSE)
+    values_KLD_LZC.append(kld_LZC)
+    values_KLD_gzip.append(kld_gzip)
+
+  df['KLD_gradImg'] = values_KLD_gradImgSE
+  df['KLD_LZC'] = values_KLD_LZC
+  df['KLD_fftPSD'] = values_KLD_psdSE
+  df['KLD_GzipSize'] = values_KLD_gzip
+  df['FID']=values_FID
   print(df)
   df.to_csv(os.path.join(FLAGS.workdir, "eval_results.csv"), sep="\t", index=False)
 
 
+def _calc_KLD_use_gaussian_kde(data_real, data_gen, show_dist=False):
+  print(data_real.shape)
+  print(data_gen.shape)
+  xmin, ymin = np.min(np.vstack([data_real, data_gen]), axis=0)
+  xmax, ymax = np.max(np.vstack([data_real, data_gen]), axis=0)
+  X, Y = np.mgrid[xmin:xmax:100j, ymin:ymax:100j]
+  grid_coords = np.vstack([X.flatten(), Y.flatten()])
+  kde1 = sps.gaussian_kde(data_real.T)
+  kde2 = sps.gaussian_kde(data_gen.T)
+  pdf1 = kde1(grid_coords)
+  pdf2 = kde2(grid_coords)
+  pdf1 = pdf1 / np.sum(pdf1)
+  pdf2 = pdf2 / np.sum(pdf2)
+  # KLD(P||Q)
+  KLD_12 = sps.entropy(pk=pdf1, qk=pdf2)
+  if show_dist:
+    pdf1 = np.reshape(pdf1.T, X.shape)
+    pdf2 = np.reshape(pdf2.T, X.shape)
+    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(12,4), 
+            #sharex=True, sharey=True,
+            )
+    axes[0].plot(data_real[:,0], data_real[:,1], 'b.', markersize=2)
+    axes[0].plot(data_gen[:,0], data_gen[:,1], 'r.', markersize=2)
+    axes[0].set_title("KLD(P||Q)={}".format(np.around(KLD_12, 6)))
+    axes[0].grid()
+    axes[0].set_aspect('auto')
+    # P
+    axes[1].imshow(np.rot90(pdf1), cmap=plt.cm.gist_earth_r,
+          extent=[xmin, xmax, ymin, ymax],
+          )
+    axes[1].set_aspect('auto')
+    axes[1].set_title("P")
+    axes[1].plot(data_real[:,0], data_real[:,1], 'b.', markersize=2)
+    # Q
+    axes[2].imshow(np.rot90(pdf2), cmap=plt.cm.gist_earth_r,
+          extent=[xmin, xmax, ymin, ymax],
+          )
+    axes[2].set_title("Q")
+    axes[2].plot(data_gen[:,0], data_gen[:,1], 'r.', markersize=2)
+    axes[2].set_aspect('auto')
+  return KLD_12
 
-def read_features(csv_file):
-  df = pd.read_csv(csv_file, sep='\s+')
-  cols = list(df)
-  cols_inceptV3 = [_ for _ in cols if _.startswith("inceptV3")]
-  gimgSE_feats = df[['Hx', 'Hy']].values
-  psdSE_feats = df[['S0x', 'S0y']].values
-  inceptV3_feats = df[cols_inceptV3].values
-  return (gimgSE_feats, psdSE_feats, inceptV3_feats)
-  
 
 def nd_gaus(x, mu, sigma):
   """
@@ -161,5 +230,6 @@ def calc_FID(real_features, fake_features):
 
 if __name__=="__main__":
   main()
+  plt.show()
 
 
