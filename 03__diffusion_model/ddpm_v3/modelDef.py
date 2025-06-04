@@ -652,8 +652,11 @@ class DiffusionModel(keras.Model):
       #print(f"Frozen graph saved to {frozen_graph_path}")   
     
     # Save the latest EMA weights
-    ema_latest_path = os.path.join(savedir, "ema_latest.weights.h5")
-    self.ema_network.save_weights(ema_latest_path)
+    unet_latest_path = os.path.join(savedir, "unet_latest.weights.h5")
+    unet_latest_path_ema = os.path.join(savedir, "unet_latest_ema.weights.h5")
+    self.network.save_weights(unet_latest_path)
+    self.ema_network.save_weights(unet_latest_path_ema)
+
     #print(f"EMA latest weights saved to {ema_latest_path}")
 
   @tf.function
@@ -675,7 +678,7 @@ class DiffusionModel(keras.Model):
         f.write(frozen_graph_def.SerializeToString())
   
   def generate_images(self, epoch=None, logs=None, 
-    savedir='./', num_images=10, clip_denoise=False, 
+    savedir='./', num_images=16, clip_denoise=False, 
     gen_inputs=None, _freeze_ini=False, export_interm=False,
     ):
     #
@@ -717,7 +720,7 @@ class DiffusionModel(keras.Model):
 
     for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
       tt = tf.fill(n_imgs, t)
-      y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=1)
+      y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=16)
       pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
         samples, tt, self.diff_util.pred_type, y_pred, 
         clip_denoise=clip_denoise,
@@ -757,8 +760,8 @@ class DiffusionModel(keras.Model):
         temp_t_images = np.clip(temp_t_images, -1, 1)
         temp_t_images = 0.5 * (temp_t_images+1)
         # Chop
-        temp_t_images[temp_t_images < 0.01] = 0
-        temp_t_images[temp_t_images > 0.99] = 1
+        #temp_t_images[temp_t_images < 0.01] = 0
+        #temp_t_images[temp_t_images > 0.99] = 1
         d_output[temp_key] = temp_t_images
     
     mem_log.close()
@@ -768,12 +771,14 @@ class DiffusionModel(keras.Model):
     output_images = np.clip(output_images, -1, 1)
     output_images = 0.5 * (output_images+1)
     # Chop
-    output_images[output_images < 0.01] = 0
-    output_images[output_images > 0.99] = 1
+    #output_images[output_images < 0.01] = 0
+    #output_images[output_images > 0.99] = 1
 
     # 3. Return generated samples
     ss = "x".join(list(map(str, samples.numpy().shape)))
-    output_fn = "ddim_eta"+str(self.diff_util.ddim_eta)+"_gen_"+ss
+    eta = str(self.diff_util.ddim_eta)
+    revs = str(self.diff_util.reverse_stride)
+    output_fn = "ddim_eta" + eta + "_rev" + revs + "_gen_"+ss 
     if not clip_denoise:
       output_fn = output_fn + "_raw"
     output_fn = os.path.join(savedir, output_fn)

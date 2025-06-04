@@ -271,7 +271,7 @@ def main():
     # Compile the model
     ddpm.compile(
       loss=loss_fn,
-      optimizer=keras.optimizers.Adam(
+      optimizer=keras.optimizers.AdamW(
         learning_rate=learning_rate,
         #weight_decay=1.0e-5,
         )
