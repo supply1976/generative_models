@@ -15,13 +15,14 @@ from accelerate import Accelerator
 from tqdm.auto import tqdm
 import os, sys, math
 import PIL
+import numpy as np
 
 
 @dataclass(order=True, frozen=True)
 class TrainingConfig:
   image_size: int = 512
-  train_batch_size: int = 8
-  eval_batch_size: int = 8
+  train_batch_size: int = 2
+  eval_batch_size: int = 2
   num_epochs: int = 20
   gradient_accumulation_steps: int = 1
   learning_rate: float = 1.0e-4
@@ -120,6 +121,40 @@ def train_loop(config, noise_scheduler, model, optimizer, train_dataloader, lr_s
         pipeline.save_pretrained(config.output_dir)
 
 
+class NumpyDataset(torch.utils.data.Dataset):
+  def __init__(self, X_np, y_np=None, transform=None):
+    """
+    Args:
+       X_np (np.ndarray): Feature array of shape (N, …).
+       y_np (np.ndarray): Label array of shape (N,).
+       transform (callable, optional): Optional transform to apply to X.
+    """
+    self.X_np = X_np
+    self.y_np = y_np
+    self.transform = transform
+
+    self.X = torch.from_numpy(X_np)
+    if y_np is not None:
+      assert len(X_np) == len(y_np), "Features and labels must have the same length"
+      self.y = torch.from_numpy(y_np)  # dtype int64 if y_np is int64
+
+  def __len__(self):
+    return len(self.X)
+
+  def __getitem__(self, idx):
+    # If you converted up front (Option A):
+    x = self.X[idx]  # torch.FloatTensor
+    if self.transform:
+      # If you need to do any additional processing on x
+      x = self.transform(x)
+
+    if self.y_np is not None:
+      label = self.y[idx]  # torch.LongTensor or FloatTensor
+      return x, label
+    else:
+      return {'images': x}
+
+
 config = TrainingConfig()
 
 #dataset_name = "huggan/smithsonian_butterflies_subset"
@@ -128,7 +163,8 @@ config = TrainingConfig()
 
 npz_file = "/home/tacowu/mydatasets/metal_test1_713/all_images_713x512x512x1.npz"
 images = np.load(npz_file)['images']
-
+images = np.transpose(images, [0, 3, 1, 2])
+dataset = NumpyDataset(images)
 
 
 #######
@@ -136,10 +172,11 @@ train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.train_
 
 model = UNet2DModel(
   sample_size=config.image_size,
-  in_channels=3,
-  out_channels=3,
+  in_channels=1,
+  out_channels=1,
   layers_per_block=2,
-  block_out_channels=(128, 128, 256, 256, 512, 512),
+  block_out_channels=(64, 64, 128, 128, 256, 256),
+  #block_out_channels=(128, 128, 256, 256, 512, 512),
   down_block_types=(
     "DownBlock2D",
     "DownBlock2D",
