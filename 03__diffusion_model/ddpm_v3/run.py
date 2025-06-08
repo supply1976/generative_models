@@ -9,7 +9,8 @@ from tensorflow.keras.callbacks import CSVLogger
 import modelDef
 from data_loader import DataLoader
 
-tf.debugging.disable_traceback_filtering()
+
+#tf.debugging.disable_traceback_filtering()
 
 
 def init_logging(filename, checkpoint=None):
@@ -44,7 +45,7 @@ def main():
   if 'REPEAT' not in dataset_dict.keys(): 
     dataset_dict['REPEAT'] = 1
   dataset_repeat = dataset_dict['REPEAT']
-  clip_size = dataset_dict['PREPROCESSING']['CLIP_SIZE']
+  crop_size = dataset_dict['PREPROCESSING']['CROP_SIZE']
   CLIP_MIN  = dataset_dict['PREPROCESSING']['CLIP_MIN']
   CLIP_MAX  = dataset_dict['PREPROCESSING']['CLIP_MAX']
 
@@ -67,6 +68,7 @@ def main():
   first_channel      = training_dict['NETWORK']['FIRST_CHANNEL']
   channel_multiplier = training_dict['NETWORK']['CHANNEL_MULTIPLIER']
   has_attention      = training_dict['NETWORK']['HAS_ATTENTION']
+  num_heads          = training_dict['NETWORK']['NUM_HEADS']
   assert len(channel_multiplier)==len(has_attention)
   widths = [first_channel * mult for mult in channel_multiplier]
   temb_dim           = training_dict['NETWORK']['TIME_EMB_DIM']
@@ -98,9 +100,10 @@ def main():
     image_channel  = input_image_channel,
     widths         = widths,
     has_attention  = has_attention,
+    num_heads      = num_heads,
     num_res_blocks = num_res_blocks,
     norm_groups    = norm_groups,
-    activation_fn  = keras.activations.swish,
+    actf           = keras.activations.swish,
     block_size     = block_size,
     temb_dim       = temb_dim,
     )
@@ -110,9 +113,10 @@ def main():
     image_channel  = input_image_channel,
     widths         = widths,
     has_attention  = has_attention,
+    num_heads      = num_heads,
     num_res_blocks = num_res_blocks,
     norm_groups    = norm_groups,
-    activation_fn  = keras.activations.swish,
+    actf           = keras.activations.swish,
     block_size     = block_size,
     temb_dim       = temb_dim,
     )
@@ -199,11 +203,12 @@ def main():
       logging.info("[INFO] Use a folder contains multiple npz files for training")
       logging.info("[INFO] Dataset path: {}".format(dataset_path))
       dataloader = DataLoader(
-        data_dir=dataset_path, 
-        crop_size=clip_size,
+        data_dir=dataset_path,
+        img_size = input_image_size,
+        crop_size=crop_size,
         dataset_repeat=dataset_repeat,
         )
-      train_ds, valid_ds = dataloader.load_dataset()
+      train_ds, valid_ds = dataloader._get_dataset()
     else:
       assert os.path.isfile(dataset_path)
       assert dataset_path.endswith(".npz")
@@ -277,6 +282,22 @@ def main():
         )
     )
 
+    """
+    for data in train_ds:
+      #print(data)
+      print(type(data))
+      batch_size = tf.shape(data)[0]
+      t = tf.random.uniform(
+        minval=1, maxval=1001, shape=(batch_size,), dtype=tf.int64)
+      noises = tf.random.normal(shape=tf.shape(data), dtype=data.dtype)
+
+      image_t, _ = ddpm.diff_util.q_sample(data, t, noises)
+      print(type(image_t))
+
+      y_pred = ddpm.network([image_t, t])
+      print(y_pred.shape)
+    """
+
     # Train the model
     ddpm.fit(
       train_ds,
@@ -287,7 +308,7 @@ def main():
     deltaT = np.around((time.time() - t0)/3600.0, 4)
     nowT = datetime.datetime.now()
     logging.info("[INFO] Training End: {}, elapsed time: {} hours".format(nowT, deltaT))
-    
+
   elif FLAGS.imgen:
     assert imgen_model_path is not None
     assert os.path.isfile(imgen_model_path)
@@ -300,6 +321,7 @@ def main():
       diff_util=diff_util_infer,
       timesteps=timesteps,
       )
+
     ddpm.ema_network.load_weights(imgen_model_path)
 
     if gen_output_dir is None: 
@@ -385,6 +407,7 @@ def main():
     logging.info("Generated {} images with {} seconds".format(num_gen_images, deltaT))
 
   else:
+    print(network.get_config())
     print("no action")
 
 

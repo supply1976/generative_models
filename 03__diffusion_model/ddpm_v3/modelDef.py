@@ -149,8 +149,10 @@ class DiffusionUtility:
       noise: 4D gaussian random number tensor, shape=[batch, h, w, c]
     """
     # get coefficients at t using tf.gather
-    sigma_t = tf.gather(self.sigma_coefs, t)[:,None,None,None]
-    mu_t = tf.gather(self.mu_coefs, t)[:,None,None,None]
+    sigma_t = tf.gather(self.sigma_coefs, t)
+    sigma_t = keras.layers.Reshape([1, 1, 1])(sigma_t)
+    mu_t = tf.gather(self.mu_coefs, t)
+    mu_t = keras.layers.Reshape([1, 1, 1])(mu_t)
     x_t = mu_t * x_0 + sigma_t * noise
     # velocity
     v_t = mu_t * noise - sigma_t * x_0
@@ -258,6 +260,7 @@ class TimeEmbedding(keras.layers.Layer):
       "dim": self.dim,
       "half_dim": self.half_dim,
     })
+    return config
   
   @classmethod
   def from_config(cls, config):
@@ -313,8 +316,7 @@ class DepthToSpaceLayer(keras.layers.Layer):
 
 
 def ResidualBlock(
-    width, attention, num_heads, groups, 
-    activation_fn=keras.activations.swish,
+    width, attention, num_heads, groups, actf,
     ):
   def apply(inputs):
     x, t = inputs
@@ -325,25 +327,26 @@ def ResidualBlock(
     else:
       residual = keras.layers.Conv2D(
         width, kernel_size=1, 
-        kernel_initializer=kernel_init(1.0),
+        #kernel_initializer=kernel_init(1.0),
         )(x)
 
-    temb = activation_fn(t)
+    temb = keras.layers.Activation(actf)(t)
     temb = keras.layers.Dense(
       width, 
-      kernel_initializer=kernel_init(1.0),
-      )(temb)[:, None, None, :]
+      #kernel_initializer=kernel_init(1.0),
+      )(temb)
+    temb = keras.layers.Reshape([1, 1, -1])(temb)
 
     x = keras.layers.GroupNormalization(groups=groups)(x)
-    x = activation_fn(x)
+    x = keras.layers.Activation(actf)(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      kernel_initializer=kernel_init(1.0),
+      #kernel_initializer=kernel_init(1.0),
       )(x)
     x = keras.layers.Add()([x, temb])
     x = keras.layers.GroupNormalization(groups=groups)(x)
-    x = activation_fn(x)
+    x = keras.layers.Activation(actf)(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      kernel_initializer=kernel_init(0.0),
+      #kernel_initializer=kernel_init(0.0),
       )(x)
     x = keras.layers.Add()([x, residual])
     # check attention
@@ -361,7 +364,7 @@ def DownSample(width):
   def apply(x):
     x = keras.layers.Conv2D(width, kernel_size=3, strides=2, 
       padding="same", 
-      kernel_initializer=kernel_init(1.0),
+      #kernel_initializer=kernel_init(1.0),
       )(x)
     return x
   return apply
@@ -371,20 +374,20 @@ def UpSample(width, interpolation="nearest"):
   def apply(x):
     x = keras.layers.UpSampling2D(size=2, interpolation=interpolation)(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      kernel_initializer=kernel_init(1.0),
+      #kernel_initializer=kernel_init(1.0),
       )(x)
     return x
   return apply
 
 
-def TimeMLP(units, activation_fn=keras.activations.swish):
+def TimeMLP(units, actf=keras.activations.swish):
   def apply(inputs):
-    temb = keras.layers.Dense(units, activation=activation_fn, 
-      kernel_initializer=kernel_init(1.0),
+    temb = keras.layers.Dense(units, activation=actf, 
+      #kernel_initializer=kernel_init(1.0),
       )(inputs)
     temb = keras.layers.Dense(
       units, 
-      kernel_initializer=kernel_init(1.0),
+      #kernel_initializer=kernel_init(1.0),
       )(temb)
     return temb
   return apply
@@ -399,7 +402,7 @@ def build_model(
   num_res_blocks=2, 
   norm_groups=8, 
   interpolation="nearest",
-  activation_fn=keras.activations.swish,
+  actf=keras.activations.swish,
   block_size=1,
   temb_dim=128,
   #kernel_init=kernel_init,
@@ -456,11 +459,11 @@ def build_model(
     widths[0],
     kernel_size=(3, 3),
     padding="same",
-    kernel_initializer=kernel_init(1.0),
+    #kernel_initializer=kernel_init(1.0),
     )(x)
   
   temb = TimeEmbedding(dim=temb_dim)(time_input)
-  temb = TimeMLP(units=temb_dim, activation_fn=activation_fn)(temb)
+  temb = TimeMLP(units=temb_dim, actf=actf)(temb)
 
   skips = [x]
 
@@ -469,7 +472,7 @@ def build_model(
     for _ in range(num_res_blocks):
       x = ResidualBlock(
         widths[i], has_attention[i], num_heads=num_heads, 
-        groups=norm_groups, activation_fn=activation_fn)([x, temb])
+        groups=norm_groups, actf=actf)([x, temb])
       skips.append(x)
 
     if i != len(widths)-1:
@@ -479,27 +482,27 @@ def build_model(
   # MiddleBlock
   x = ResidualBlock(
     widths[-1], has_attention[-1], num_heads=num_heads,
-    groups=norm_groups, activation_fn=activation_fn)([x, temb])
+    groups=norm_groups, actf=actf)([x, temb])
   
   x = ResidualBlock(
     widths[-1], False, num_heads=num_heads,
-    groups=norm_groups, activation_fn=activation_fn)([x, temb])
+    groups=norm_groups, actf=actf)([x, temb])
 
   # UpBlock
   for i in reversed(range(len(widths))):
     for _ in range(num_res_blocks + 1):
       x = keras.layers.Concatenate(axis=-1)([x, skips.pop()])
       x = ResidualBlock(widths[i], has_attention[i], num_heads=num_heads, 
-        groups=norm_groups, activation_fn=activation_fn)([x, temb])
+        groups=norm_groups, actf=actf)([x, temb])
     
     if i != 0:
       x = UpSample(widths[i], interpolation=interpolation)(x)
 
   # End block
   x = keras.layers.GroupNormalization(groups=norm_groups)(x)
-  x = activation_fn(x)
+  x = keras.layers.Activation(actf)(x)
   x = keras.layers.Conv2D(image_channel*(block_size**2), (3, 3), padding="same", 
-    kernel_initializer=kernel_init(0.0),
+    #kernel_initializer=kernel_init(0.0),
     name="final_conv2d",
     )(x)
   
@@ -539,12 +542,13 @@ class DiffusionModel(keras.Model):
     t = tf.random.uniform(
       minval=1, maxval=self.timesteps+1, shape=(batch_size,), dtype=tf.int64
     )
-    
+   
     with tf.GradientTape() as tape:
       # Sample random noise to be added to the images in the batch
       noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
       # Diffuse the images with noise
       (images_t, v_t) = self.diff_util.q_sample(images, t, noises)
+      
       # get model output
       y_pred = self.network([images_t, t], training=True)
       # get predict components
@@ -652,10 +656,12 @@ class DiffusionModel(keras.Model):
       #print(f"Frozen graph saved to {frozen_graph_path}")   
     
     # Save the latest EMA weights
-    unet_latest_path = os.path.join(savedir, "unet_latest.weights.h5")
-    unet_latest_path_ema = os.path.join(savedir, "unet_latest_ema.weights.h5")
-    self.network.save_weights(unet_latest_path)
-    self.ema_network.save_weights(unet_latest_path_ema)
+    path_unet_latest = os.path.join(savedir, "unet_latest")
+    path_unet_latest_ema = os.path.join(savedir, "unet_latest_ema")
+    self.network.save(path_unet_latest+".h5", include_optimizer=False)
+    self.ema_network.save(path_unet_latest_ema+".h5", include_optimizer=False)
+    #self.network.save_weights(path_unet_latest+".weight.h5")
+    self.ema_network.save_weights(path_unet_latest_ema+".weight.h5")
 
     #print(f"EMA latest weights saved to {ema_latest_path}")
 
@@ -771,8 +777,8 @@ class DiffusionModel(keras.Model):
     output_images = np.clip(output_images, -1, 1)
     output_images = 0.5 * (output_images+1)
     # Chop
-    #output_images[output_images < 0.01] = 0
-    #output_images[output_images > 0.99] = 1
+    output_images[output_images < 0.01] = 0
+    output_images[output_images > 0.99] = 1
 
     # 3. Return generated samples
     ss = "x".join(list(map(str, samples.numpy().shape)))
@@ -790,4 +796,17 @@ class DiffusionModel(keras.Model):
 
 if __name__=="__main__":
   # TODO simple unittest
-  pass
+  model = build_model(
+    128, 
+    3, 
+    [32, 64, 128, 256],
+    [False, False, True, True])
+  model.summary()
+  print(model.get_config())
+
+  for ly in model.layers:
+    if "dense" in ly.name:
+      print(ly.name, ly)
+
+
+

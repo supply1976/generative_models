@@ -8,7 +8,8 @@ from tensorflow import keras
 
 class DataLoader:
   def __init__(self, 
-    data_dir, 
+    data_dir,
+    img_size,
     crop_size=None, 
     npz_key='image', 
     file_format='.npz',
@@ -24,6 +25,7 @@ class DataLoader:
     """
     self.CLIP_MAX = 1.0
     self.CLIP_MIN = -1.0
+    self.img_size = img_size
     self.crop_size = crop_size
     self.npz_key = npz_key
     self.data_dir = os.path.abspath(data_dir)
@@ -49,54 +51,59 @@ class DataLoader:
     print(f"Found {len(self.train_npzfiles)} training files")
     print(f"Found {len(self.valid_npzfiles)} validation files.")
     self.all_npzfiles = self.train_npzfiles + self.valid_npzfiles
+    self.train_ds = tf.data.Dataset.from_tensor_slices(self.all_npzfiles)
+    self.valid_ds = tf.data.Dataset.from_tensor_slices(self.valid_npzfiles)
+    #print(self.train_ds)
+    #print(self.valid_ds)
 
-  def load_dataset(self):
-    train_ds = tf.data.Dataset.from_tensor_slices(self.all_npzfiles)
-    valid_ds = tf.data.Dataset.from_tensor_slices(self.valid_npzfiles)
+  def _load_npz(self, path):
 
     def _preprocess(x):
-      raw_name = x.numpy().decode()
+      #raw_name = x.numpy().decode()
+      raw_name = x.decode('utf-8')
       data = np.load(raw_name)
       assert self.npz_key in list(data.keys())
-      img = data[self.npz_key].astype(np.float32)
-      if len(img.shape) == 2:
-        img = np.expand_dims(img, axis=-1)
-      h, w, c = img.shape
-      assert h==w
+      arr = data[self.npz_key].astype(np.float32)
+      if len(arr.shape) == 2:
+        arr = np.expand_dims(arr, axis=-1)
+      self.h, self.w, self.c = arr.shape
 
       if self.crop_size is not None:
         llx = (h - self.crop_size)//2
         lly = (w - self.crop_size)//2
         urx = llx + self.crop_size
         ury = lly + self.crop_size
-        img = img[llx:urx, lly:ury, :]
-      img = (img) *(self.CLIP_MAX-self.CLIP_MIN) + self.CLIP_MIN
-      return img
-
+        arr = arr[llx:urx, lly:ury, :]
+        
+      arr = (arr) *(self.CLIP_MAX-self.CLIP_MIN) + self.CLIP_MIN
+      return arr
+    img = tf.numpy_function(_preprocess, [path], tf.float32)
+    img_size = self.img_size if self.crop_size is None else self.crop_size
+    img = tf.ensure_shape(img, [img_size, img_size, None])
+    
+    return img
+    
+  def _get_dataset(self):
     # train ds
-    train_ds = train_ds.cache().repeat(self.dataset_repeat)
-    train_ds = train_ds.shuffle(train_ds.cardinality())
-    train_ds = train_ds.map(
-      lambda x: tf.py_function(_preprocess, [x], tf.float32),
-      num_parallel_calls=tf.data.AUTOTUNE)
+    train_ds = (
+      self.train_ds
+      .cache()
+      .repeat(self.dataset_repeat)
+      .shuffle(buffer_size=10000)
+      .map(self._load_npz, num_parallel_calls=tf.data.AUTOTUNE)
+    )
     # valid ds  
-    valid_ds = valid_ds.cache()
-    valid_ds = valid_ds.map(
-      lambda x: tf.py_function(_preprocess, [x], tf.float32),
-      num_parallel_calls=tf.data.AUTOTUNE)
-
+    valid_ds = (
+      self.valid_ds
+      .cache()
+      .map(self._load_npz, num_parallel_calls=tf.data.AUTOTUNE)
+    )
     return (train_ds, valid_ds)
 
 
 def unit_test():
   # test the DataLoader
-
   pass 
-  #data_dir = sys.argv[1]
-  #dataloader = DataLoader(data_dir=data_dir)
-  #ds = dataloader.load_dataset(batch_size=3)
-  #for x in ds.take(1):
-  #  print(x.shape, type(x), tf.shape(x))
 
 
 if __name__ == "__main__":
