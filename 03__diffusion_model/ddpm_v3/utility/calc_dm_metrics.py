@@ -21,7 +21,9 @@ def create_base_df(gen_csv_files):
     pdir = os.path.dirname(csv)
     ppdir = os.path.dirname(pdir)
     print(pdir)
-    rev_steps, gen_date = (os.path.basename(pdir)).split("_")[1:]
+    rev_steps = (os.path.basename(pdir)).split("_")[1]
+    gen_date = (os.path.basename(pdir)).split("_")[-1]
+
     yaml_fn = os.path.join(ppdir, "training_config.yaml")
     
     with open(os.path.join(pdir, "imgen.log"), 'r') as f_imlog:
@@ -98,7 +100,10 @@ def main():
         gen_csv_files.append(csv_file)
   
   print("#"*80)
-  df = create_base_df(gen_csv_files)
+  try:
+    df = create_base_df(gen_csv_files)
+  except:
+    df = pd.DataFrame()
   
   values_FID=[]
   values_KLD_gradImgSE=[]
@@ -106,6 +111,7 @@ def main():
   values_KLD_LZC=[]
   values_KLD_gzip=[]
   for i, gen_csv in enumerate(gen_csv_files):
+    print(i, "/", len(gen_csv_files))
     df_gen = pd.read_csv(gen_csv, sep='\s+')
     feats_gradImgSE_gen = df_gen[cols_gradImgSE].values
     feats_psdSE_gen     = df_gen[cols_psdSE].values
@@ -124,18 +130,20 @@ def main():
     values_KLD_LZC.append(kld_LZC)
     values_KLD_gzip.append(kld_gzip)
 
-  df['KLD_gradImg'] = values_KLD_gradImgSE
-  df['KLD_LZC'] = values_KLD_LZC
-  df['KLD_fftPSD'] = values_KLD_psdSE
-  df['KLD_GzipSize'] = values_KLD_gzip
-  df['FID']=values_FID
+  df['KLD_gradImg'] = np.around(values_KLD_gradImgSE, 4)
+  df['KLD_LZC'] = np.around(values_KLD_LZC, 4)
+  df['KLD_fftPSD'] = np.around(values_KLD_psdSE, 4)
+  df['KLD_GzipSize'] = np.around(values_KLD_gzip, 4)
+  df['FID'] = np.around(values_FID, 4)
   print(df)
   df.to_csv(os.path.join(FLAGS.workdir, "eval_results.csv"), sep="\t", index=False)
+  for csv in gen_csv_files:
+    print(csv)
 
 
 def _calc_KLD_use_gaussian_kde(data_real, data_gen, show_dist=False):
-  print(data_real.shape)
-  print(data_gen.shape)
+  #print(data_real.shape)
+  #print(data_gen.shape)
   xmin, ymin = np.min(np.vstack([data_real, data_gen]), axis=0)
   xmax, ymax = np.max(np.vstack([data_real, data_gen]), axis=0)
   X, Y = np.mgrid[xmin:xmax:100j, ymin:ymax:100j]
@@ -146,8 +154,12 @@ def _calc_KLD_use_gaussian_kde(data_real, data_gen, show_dist=False):
   pdf2 = kde2(grid_coords)
   pdf1 = pdf1 / np.sum(pdf1)
   pdf2 = pdf2 / np.sum(pdf2)
+  
   # KLD(P||Q)
-  KLD_12 = sps.entropy(pk=pdf1, qk=pdf2)
+  #KLD_12 = sps.entropy(pk=pdf1, qk=pdf2)
+  KLD_12 = tf.keras.losses.kld(pdf1, pdf2)
+  KLD_12 = KLD_12.numpy()
+
   if show_dist:
     pdf1 = np.reshape(pdf1.T, X.shape)
     pdf2 = np.reshape(pdf2.T, X.shape)

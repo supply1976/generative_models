@@ -3,10 +3,10 @@ import math
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+#import tensorflow.keras.saving as keras_saving
 import tqdm
 import gc
 
-tf.debugging.disable_traceback_filtering()
 
 #tf.config.set_visible_devices([], 'GPU')
 #tf.config.set_visible_devices([], 'CPU')
@@ -26,8 +26,10 @@ tf.debugging.disable_traceback_filtering()
 #tf.config.experimental.set_virtual_device_configuration(
 #    tf.config.list_physical_devices('GPU')[3],
 #    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=4096)])
+
+#tf.debugging.disable_traceback_filtering()
 #tf.config.run_functions_eagerly(True)
-#tf.config.optimizer.set_jit(True) # enable XLA
+tf.config.optimizer.set_jit(True) # enable XLA
 #tf.config.optimizer.set_experimental_options({"auto_mixed_precision": True})
 #tf.config.optimizer.set_experimental_options({"layout_optimizer": True})
 #tf.config.optimizer.set_experimental_options({"constant_folding": True})
@@ -149,10 +151,8 @@ class DiffusionUtility:
       noise: 4D gaussian random number tensor, shape=[batch, h, w, c]
     """
     # get coefficients at t using tf.gather
-    sigma_t = tf.gather(self.sigma_coefs, t)
-    sigma_t = keras.layers.Reshape([1, 1, 1])(sigma_t)
-    mu_t = tf.gather(self.mu_coefs, t)
-    mu_t = keras.layers.Reshape([1, 1, 1])(mu_t)
+    sigma_t = tf.gather(self.sigma_coefs, t)[:,None,None,None]
+    mu_t = tf.gather(self.mu_coefs, t)[:,None,None,None]
     x_t = mu_t * x_0 + sigma_t * noise
     # velocity
     v_t = mu_t * noise - sigma_t * x_0
@@ -210,8 +210,7 @@ class DiffusionUtility:
     return x_s
 
 
-# Kernel initializer to use
-# This is from original DDPM paper
+# Kernel initializer to use, this is from original DDPM paper
 def kernel_init(scale):
   scale = max(scale, 1e-10)
   return keras.initializers.VarianceScaling(scale, mode="fan_avg", distribution="uniform")
@@ -229,11 +228,6 @@ class TimeEmbedding(keras.layers.Layer):
     if dim <=0 or dim % 2 != 0:
       raise ValueError("`dim` must be a positive even integer.")
     self.dim = dim
-    self.half_dim = dim // 2
-    self.emb = tf.exp(
-      tf.range(self.half_dim, dtype=tf.float32) * 
-      -(tf.math.log(10000.0) / (self.half_dim - 1))
-    )
     
   def call(self, inputs):
     """
@@ -246,8 +240,8 @@ class TimeEmbedding(keras.layers.Layer):
     inputs = tf.cast(inputs, dtype=tf.float32)
     if len(inputs.shape) != 1:
       raise ValueError("Input tensor must be 1D.")
-    
-    emb = inputs[:, None] * self.emb[None, :]
+    emb = tf.exp(tf.linspace(0.0, 1.0, self.dim//2) * -tf.math.log(10000.0))
+    emb = inputs[:, None] * emb[None, :]
     emb = tf.concat([tf.sin(emb), tf.cos(emb)], axis=-1)
     return emb
   
@@ -258,7 +252,6 @@ class TimeEmbedding(keras.layers.Layer):
     config = super().get_config()
     config.update({
       "dim": self.dim,
-      "half_dim": self.half_dim,
     })
     return config
   
@@ -272,6 +265,19 @@ class TimeEmbedding(keras.layers.Layer):
       TimeEmbedding: The TimeEmbedding layer instance.
     """
     return cls(**config)
+
+
+def TimeMLP(units, actf=keras.activations.swish):
+  def apply(inputs):
+    temb = keras.layers.Dense(units, activation=actf, 
+      #kernel_initializer=kernel_init(1.0),
+      )(inputs)
+    temb = keras.layers.Dense(
+      units, activation=None, 
+      #kernel_initializer=kernel_init(1.0),
+      )(temb)
+    return temb
+  return apply
 
 
 class SpaceToDepthLayer(keras.layers.Layer):
@@ -315,18 +321,17 @@ class DepthToSpaceLayer(keras.layers.Layer):
   
 
 
-def ResidualBlock(
-    width, attention, num_heads, groups, actf,
-    ):
+def ResidualBlock(width, attention, num_heads, groups, actf):
   def apply(inputs):
     x, t = inputs
+    #input_width = tf.shape(x)[3]
     input_width = x.shape[3]
 
     if input_width == width:
       residual = x
     else:
       residual = keras.layers.Conv2D(
-        width, kernel_size=1, 
+        filters=width, kernel_size=1, 
         #kernel_initializer=kernel_init(1.0),
         )(x)
 
@@ -380,32 +385,18 @@ def UpSample(width, interpolation="nearest"):
   return apply
 
 
-def TimeMLP(units, actf=keras.activations.swish):
-  def apply(inputs):
-    temb = keras.layers.Dense(units, activation=actf, 
-      #kernel_initializer=kernel_init(1.0),
-      )(inputs)
-    temb = keras.layers.Dense(
-      units, 
-      #kernel_initializer=kernel_init(1.0),
-      )(temb)
-    return temb
-  return apply
-
-
 def build_model(
-  image_size, 
-  image_channel, 
-  widths, 
-  has_attention,
+  image_size=256, 
+  image_channel=1, 
+  widths=[32, 64, 128, 256], 
+  has_attention=[False, False, False, True],
   num_heads=1,
   num_res_blocks=2, 
-  norm_groups=8, 
+  norm_groups=32, 
   interpolation="nearest",
   actf=keras.activations.swish,
-  block_size=1,
+  block_size=2,
   temb_dim=128,
-  #kernel_init=kernel_init,
   ):
   """
     Build UNet model
@@ -447,7 +438,7 @@ def build_model(
 
   input_shape = (image_size, image_size, image_channel)
   image_input = keras.Input(shape=input_shape, name="image_input")
-  time_input = keras.Input(shape=(), dtype=tf.int64, name="time_input")
+  time_input = keras.Input(shape=(), dtype=tf.int32, name="time_input")
   
   if block_size >1 :
     assert image_size%block_size==0
@@ -456,7 +447,7 @@ def build_model(
     x = image_input
   
   x = keras.layers.Conv2D(
-    widths[0],
+    filters=widths[0],
     kernel_size=(3, 3),
     padding="same",
     #kernel_initializer=kernel_init(1.0),
@@ -540,7 +531,7 @@ class DiffusionModel(keras.Model):
     batch_size = tf.shape(images)[0]
     # Random sample timesteps uniformly, t is time index tensor
     t = tf.random.uniform(
-      minval=1, maxval=self.timesteps+1, shape=(batch_size,), dtype=tf.int64
+      minval=1, maxval=self.timesteps+1, shape=(batch_size,), dtype=tf.int32
     )
    
     with tf.GradientTape() as tape:
@@ -570,7 +561,14 @@ class DiffusionModel(keras.Model):
     # Get the gradients of the loss with respect to the model's trainable weights
     # update the weights of the network
     gradients = tape.gradient(loss, self.network.trainable_weights)
-    self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
+    # Apply gradient clip
+    clipped_grads = [
+      tf.clip_by_norm(g, clip_norm=1.0) if g is not None else None
+      for g in gradients
+    ]
+
+    #self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
+    self.optimizer.apply_gradients(zip(clipped_grads, self.network.trainable_weights))
     # Update EMA weights
     self._update_ema_weights()
 
@@ -593,7 +591,7 @@ class DiffusionModel(keras.Model):
   def test_step(self, images):
     batch_size = tf.shape(images)[0]
     t = tf.random.uniform(minval=1, maxval=self.timesteps+1, 
-      shape=(batch_size,), dtype=tf.int64)
+      shape=(batch_size,), dtype=tf.int32)
     
     noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
     (images_t, v_t) = self.diff_util.q_sample(images, t, noises)
@@ -631,15 +629,10 @@ class DiffusionModel(keras.Model):
 
     epo = str(epoch).zfill(5)
     
-    # Trace the EMA network with sample input
-    #sample_input_x, sample_input_t = self.network.inputs
-    #sample_input = tf.random.normal([1]+list(sample_input_x.shape[1:]))
-    #sample_input_t = tf.constant([1], dtype=tf.int64)
-    #_ = self.ema_network([sample_input_x, sample_input_t], training=False)
-
     if epoch%1000==0 and epoch>0:
-      ema_weights_path = os.path.join(savedir, f"ema_epoch_{epo}.weights.h5")
-      self.ema_network.save_weights(ema_weights_path)
+      pass
+      #ema_weights_path = os.path.join(savedir, f"ema_epoch_{epo}.weights.h5")
+      #self.ema_network.save_weights(ema_weights_path)
       #print("save ema weights to {}".format(ema_weights_path))
       
       # Save the full model in .pb format (SavedModel format)
@@ -656,12 +649,12 @@ class DiffusionModel(keras.Model):
       #print(f"Frozen graph saved to {frozen_graph_path}")   
     
     # Save the latest EMA weights
-    path_unet_latest = os.path.join(savedir, "unet_latest")
-    path_unet_latest_ema = os.path.join(savedir, "unet_latest_ema")
+    name_string = "unet_tf"+tf.__version__+"_latest"
+    path_unet_latest = os.path.join(savedir, name_string)
+    path_unet_latest_ema = os.path.join(savedir, "ema_"+name_string)
     self.network.save(path_unet_latest+".h5", include_optimizer=False)
     self.ema_network.save(path_unet_latest_ema+".h5", include_optimizer=False)
-    #self.network.save_weights(path_unet_latest+".weight.h5")
-    self.ema_network.save_weights(path_unet_latest_ema+".weight.h5")
+    #self.ema_network.save_weights(path_unet_latest_ema+".weights.h5")
 
     #print(f"EMA latest weights saved to {ema_latest_path}")
 
@@ -721,8 +714,8 @@ class DiffusionModel(keras.Model):
     
     d_output = {}
     mem_log = open(os.path.join(savedir, "mem.log"), 'w') 
-    reverse_timeindex = np.arange(self.timesteps, 0, -self.diff_util.reverse_stride)
-    assert reverse_timeindex.dtype=='int64'
+    reverse_timeindex = np.arange(
+      self.timesteps, 0, -self.diff_util.reverse_stride, dtype=np.int32)
 
     for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
       tt = tf.fill(n_imgs, t)
@@ -784,7 +777,7 @@ class DiffusionModel(keras.Model):
     ss = "x".join(list(map(str, samples.numpy().shape)))
     eta = str(self.diff_util.ddim_eta)
     revs = str(self.diff_util.reverse_stride)
-    output_fn = "ddim_eta" + eta + "_rev" + revs + "_gen_"+ss 
+    output_fn = "ddim_eta"+eta+"_rev"+revs+"_gen_"+ss+"_tf"+tf.__version__ 
     if not clip_denoise:
       output_fn = output_fn + "_raw"
     output_fn = os.path.join(savedir, output_fn)
@@ -796,17 +789,24 @@ class DiffusionModel(keras.Model):
 
 if __name__=="__main__":
   # TODO simple unittest
-  model = build_model(
-    128, 
-    3, 
-    [32, 64, 128, 256],
-    [False, False, True, True])
+  model = build_model()
   model.summary()
-  print(model.get_config())
+  #print(model.get_config())
 
-  for ly in model.layers:
-    if "dense" in ly.name:
-      print(ly.name, ly)
+  model.save("saved_model_tf"+tf.__version__+".h5", include_optimizer=False)
 
+  loaded_model = keras.models.load_model(
+    "saved_model_tf"+tf.__version__+".h5",
+    custom_objects={
+      "TimeEmbedding": TimeEmbedding,
+      "SpaceToDepthLayer": SpaceToDepthLayer,
+      "DepthToSpaceLayer": DepthToSpaceLayer,
+      },
+    )
+  
+  x = np.random.randn(5, 256, 256, 1).astype(np.float32)
+  t = np.random.randint(0, 100, 5, dtype=np.int32)
+  y_pred = loaded_model.predict([x, t])
+  print(y_pred.shape)
 
 
