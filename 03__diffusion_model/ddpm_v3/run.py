@@ -54,7 +54,7 @@ class TQDMProgressBar(keras.callbacks.Callback):
     # global step
     gs = int(self.model.optimizer.iterations.numpy())
     #lr = float(self.model.optimizer._decayed_lr(tf.float32).numpy())
-    lr = float(keras.backend.get_value(self.model.optimizer.lr))
+    lr = float(keras.backend.get_value(self.model.optimizer.learning_rate))
     loss = logs.get('loss')
     self.pbar.set_postfix({
         'lr': f"{lr:.4e}",
