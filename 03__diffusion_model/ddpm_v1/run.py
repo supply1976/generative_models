@@ -7,15 +7,6 @@ import modelDef
 from data_loader import DataLoader
 
 
-def _special_data_prep(img):
-  imgs = tf.unstack(img, num=3, axis=-1)
-  img_0 = imgs[0]+imgs[2]
-  img_1 = imgs[1]
-  img = tf.stack([img_0, img_1], axis=-1)
-  print(tf.shape(img), img.shape)
-  return img
-
-
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument('--training',      action='store_true')
@@ -29,17 +20,17 @@ def main():
   # model configs
   parser.add_argument('--img_size',        type=int, required=True)
   parser.add_argument('--img_channel',     type=int, default=1)
-  parser.add_argument('--epochs',          type=int, default=2)
-  parser.add_argument('--batch_size',      type=int, default=2)
+  parser.add_argument('--epochs',          type=int, default=20)
+  parser.add_argument('--batch_size',      type=int, default=4)
   parser.add_argument('--beta_schedule',   type=str, default='linear')
   parser.add_argument('--beta_start',      type=float, default=1.0e-3)
   parser.add_argument('--beta_end',        type=float, default=0.2)
-  parser.add_argument('--total_timesteps', type=int, default=100)
+  parser.add_argument('--total_timesteps', type=int, default=1000)
   parser.add_argument('--num_res_blocks', type=int, default=2)
   parser.add_argument('--norm_groups',     type=int, default=8, 
     help="number of groups in group_normalization()")
-  parser.add_argument('--learning_rate',   type=float, default=0.0005)
-  parser.add_argument('--first_ch',        type=int, default=64,
+  parser.add_argument('--learning_rate',   type=float, default=0.0001)
+  parser.add_argument('--first_ch',        type=int, default=8,
     help="first convolution channel")
   parser.add_argument('--ch_mul',nargs='+',type=int, default=[1, 2, 4, 8],
     help="channel multiplier")
@@ -62,7 +53,7 @@ def main():
   first_ch        = FLAGS.first_ch
   ch_mul          = FLAGS.ch_mul
   num_res_blocks  = FLAGS.num_res_blocks  # Number of residual blocks
-  has_attention   = [False, False, True, True]
+  has_attention   = [False, False, True, False]
   assert len(ch_mul)==len(has_attention)
   widths = [first_ch * mult for mult in ch_mul]
     
@@ -141,9 +132,10 @@ def main():
     train_images = 2*(train_images / 255.0) - 1 ; # rescale to (-1, 1)
     if FLAGS.dataset_name=="mnist":
       train_images = tf.image.resize(train_images, [32, 32])
+    #
     train_ds = tf.data.Dataset.from_tensor_slices(train_images)
     train_ds = train_ds.cache()
-    train_ds = train_ds.shuffle(train_ds.cardinality())
+    train_ds = train_ds.shuffle(buffer_size=10000)
 
   else:
     if FLAGS.dataset_path is None:
@@ -159,14 +151,14 @@ def main():
         # single (big) npz file
         data = np.load(FLAGS.dataset_path)
         train_images = data['images']
+        train_images = 2.0 * train_images - 1.0
         train_ds = tf.data.Dataset.from_tensor_slices(train_images)
         train_ds = train_ds.cache()
-        train_ds = train_ds.shuffle(train_ds.cardinality())
+        train_ds = train_ds.shuffle(buffer_size=10000)
       else:
         return
 
   if FLAGS.training and train_ds is not None:
-    #train_ds = train_ds.map(_special_data_prep, num_parallel_calls=tf.data.AUTOTUNE)
     train_ds = train_ds.batch(batch_size, drop_remainder=True)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     # get input image shape

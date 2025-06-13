@@ -53,10 +53,11 @@ class DataLoader:
       img = (img) *(CLIP_MAX-CLIP_MIN) + CLIP_MIN
       return img
 
-    ds = ds.cache()
-    ds = ds.shuffle(ds.cardinality())
-    ds = ds.map(lambda x: tf.py_function(_preprocess, [x], tf.float32),
+    ds = ds.map(
+      lambda x: tf.py_function(_preprocess, [x], tf.float32),
       num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.cache()
+    ds = ds.shuffle(buffer_size=10000)
     return ds
 
 
