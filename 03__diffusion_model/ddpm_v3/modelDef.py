@@ -107,7 +107,7 @@ class DiffusionUtility:
     assert alphas is not None
     # for forward sampling
     mu_coefs = np.sqrt(alphas)   ; # this is identical to signal_rates in other paper 
-    var_coefs = 1 - alphas       ; # this is identical to noise_powers in other paper
+    var_coefs = 1.0 - alphas       ; # this is identical to noise_powers in other paper
     sigma_coefs = np.sqrt(var_coefs) ; # this is noise_rates in other paper
     # define constant Tensors
     self.mu_coefs = tf.constant(mu_coefs, tf.float32)
@@ -171,7 +171,7 @@ class DiffusionUtility:
     (pred_noise, pred_image, pred_velocity) = (None, None, None)
     if pred_type=='noise':
       pred_noise = y_pred
-      pred_image = (x_t - sigma_t * pred_noise) / (self.eps+mu_t)
+      pred_image = (x_t - sigma_t * pred_noise) / mu_t
       pred_velocity = mu_t * pred_noise - sigma_t * pred_image
     elif pred_type=='image':
       pred_image = y_pred
@@ -200,7 +200,7 @@ class DiffusionUtility:
     rev_mu_ddim_noise = tf.gather(self.reverse_mu_ddim_noise, t)[:,None,None,None]
     if pred_noise is None:
       pred_noise = (x_t-mu_t * x_0)/sigma_t
-    _mean = keras.layers.Add()([rev_mu_ddim_x0*x_0, rev_mu_ddim_noise*pred_noise])
+    _mean = rev_mu_ddim_x0 * x_0 + rev_mu_ddim_noise * pred_noise
     _sigma = self.ddim_eta * tf.gather(self.reverse_sigma_coefs, t)[:,None,None,None]
     return (_mean, _sigma)
 
@@ -719,6 +719,8 @@ class DiffusionModel(keras.Model):
 
     for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
       tt = tf.fill(n_imgs, t)
+      #print(t, self.diff_util.reverse_mu_ddim_x0[t], self.diff_util.mu_coefs[t])
+
       y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=16)
       pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
         samples, tt, self.diff_util.pred_type, y_pred, 

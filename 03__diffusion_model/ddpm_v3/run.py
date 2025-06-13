@@ -99,9 +99,6 @@ def main():
   # dataset
   dataset_name   = dataset_dict['NAME']
   dataset_path   = dataset_dict['PATH']
-  if 'REPEAT' not in dataset_dict.keys(): 
-    dataset_dict['REPEAT'] = 1
-  dataset_repeat = dataset_dict['REPEAT']
   crop_size = dataset_dict['PREPROCESSING']['CROP_SIZE']
   CLIP_MIN  = dataset_dict['PREPROCESSING']['CLIP_MIN']
   CLIP_MAX  = dataset_dict['PREPROCESSING']['CLIP_MAX']
@@ -131,11 +128,12 @@ def main():
   temb_dim           = training_dict['NETWORK']['TIME_EMB_DIM']
 
   # hyper-parameters
-  epochs        = training_dict['HYPER_PARAMETERS']['EPOCHS']
-  batch_size    = training_dict['HYPER_PARAMETERS']['BATCH_SIZE']
-  learning_rate = training_dict['HYPER_PARAMETERS']['LEARNING_RATE']
-  warmup_steps  = training_dict['HYPER_PARAMETERS']['WARMUP_STEPS']
-  total_steps   = training_dict['HYPER_PARAMETERS']['TOTAL_STEPS']
+  epochs          = training_dict['HYPER_PARAMETERS']['EPOCHS']
+  batch_size      = training_dict['HYPER_PARAMETERS']['BATCH_SIZE']
+  learning_rate   = training_dict['HYPER_PARAMETERS']['LEARNING_RATE']
+  warmup_steps    = training_dict['HYPER_PARAMETERS']['WARMUP_STEPS']
+  steps_per_epoch = training_dict['HYPER_PARAMETERS']['STEPS_PER_EPOCH']
+  total_steps = epochs * steps_per_epoch
   # for image generation (imgen)
   imgen_model_path = imgen_dict['MODEL_PATH']
   num_gen_images   = imgen_dict['NUM_GEN_IMAGES']
@@ -265,7 +263,6 @@ def main():
         data_dir=dataset_path,
         img_size = input_image_size,
         crop_size=crop_size,
-        dataset_repeat=dataset_repeat,
         )
       train_ds, valid_ds = dataloader._get_dataset()
     else:
@@ -277,9 +274,15 @@ def main():
       idx = np.arange(len(all_images))
       np.random.shuffle(idx)
       num_val = int(0.1*len(all_images))
+      # train dataset
       train_ds = tf.data.Dataset.from_tensor_slices(all_images)
-      train_ds = train_ds.cache().repeat(dataset_repeat)
-      train_ds = train_ds.shuffle(train_ds.cardinality())
+      train_ds = (
+        train_ds
+          .cache()
+          .shuffle(buffer_size=10000)
+          .repeat()
+        )
+      #
       valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val])
       valid_ds = valid_ds.cache()
     
@@ -307,7 +310,6 @@ def main():
     logging.info("[INFO] Predict Type: {}".format(pred_type))
     logging.info("[INFO] Loss Function: {}".format(loss_fn))
     logging.info("[INFO] Total Epochs: {}".format(epochs))
-    logging.info("[INFO] Dataset Repeat: {}".format(dataset_repeat))
 
     csv_logger = CSVLogger(os.path.join(logging_dir, "log.csv"), append=True, separator=",")
     #best_ckpt_path = os.path.join(logging_dir, "dm_best.weights.h5")
@@ -359,6 +361,7 @@ def main():
       train_ds,
       validation_data=valid_ds,
       epochs=epochs,
+      steps_per_epoch=steps_per_epoch,
       callbacks=callback_list,
       )
     deltaT = np.around((time.time() - t0)/3600.0, 4)
@@ -453,7 +456,6 @@ def main():
 
     t0 = time.time()
 
-    
     ddpm.generate_images(
       num_images=num_gen_images, 
       savedir=gen_dir,

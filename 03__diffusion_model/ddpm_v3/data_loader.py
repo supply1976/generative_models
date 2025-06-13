@@ -13,7 +13,6 @@ class DataLoader:
     crop_size=None, 
     npz_key='image', 
     file_format='.npz',
-    dataset_repeat=1,
     ):
     """
     search the numpy (.npz) files in the fiven data_dir
@@ -29,7 +28,6 @@ class DataLoader:
     self.crop_size = crop_size
     self.npz_key = npz_key
     self.data_dir = os.path.abspath(data_dir)
-    self.dataset_repeat = dataset_repeat
     assert os.path.exists(self.data_dir), f"data_dir {self.data_dir} not exists"
     assert os.path.isdir(self.data_dir), f"data_dir {self.data_dir} is not a directory"
     assert self.npz_key is not None, "npz_key should not be None"
@@ -87,16 +85,16 @@ class DataLoader:
     # train ds
     train_ds = (
       self.train_ds
-      .cache()
-      .repeat(self.dataset_repeat)
-      .shuffle(buffer_size=10000)
       .map(self._load_npz, num_parallel_calls=tf.data.AUTOTUNE)
+      .cache()
+      .shuffle(buffer_size=10000)
+      .repeat()
     )
     # valid ds  
     valid_ds = (
       self.valid_ds
-      .cache()
       .map(self._load_npz, num_parallel_calls=tf.data.AUTOTUNE)
+      .cache()
     )
     return (train_ds, valid_ds)
 
