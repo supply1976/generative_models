@@ -410,11 +410,11 @@ class DiffusionModel(keras.Model):
 
   def save_model(self, epoch, logs=None, savedir=None):
     epo = str(epoch+1).zfill(4)
-    if epoch%50==0:
+    if epoch%500==0:
       self.ema_network.save_weights(os.path.join(savedir, f"ema_epoch_{epo}.weights.h5"))
     self.ema_network.save_weights(os.path.join(savedir, "ema_best.weights.h5"))
 
-  def generate_images(self, epoch=None, logs=None, savedir='./', num_images=10, 
+  def generate_images(self, epoch=None, logs=None, savedir='./', num_images=20, 
     freeze_1st=False, given_samples=None, export_intermediate=False):
     img_input, _ = self.network.inputs
     print("image input shape = {}".format(img_input.shape))
@@ -434,7 +434,7 @@ class DiffusionModel(keras.Model):
     print("generating images ...")
     for t in reversed(range(0, self.timesteps)):
       tt = tf.cast(tf.fill(tf.shape(samples)[0], t), dtype=tf.int64)
-      if t%10==0:
+      if t%50==0:
         verbose_code = 1
         print("time step {}".format(t), samples.shape)
       else:

@@ -27,10 +27,10 @@ def main():
   parser.add_argument('--beta_end',        type=float, default=0.2)
   parser.add_argument('--total_timesteps', type=int, default=1000)
   parser.add_argument('--num_res_blocks', type=int, default=2)
-  parser.add_argument('--norm_groups',     type=int, default=8, 
+  parser.add_argument('--norm_groups',     type=int, default=16, 
     help="number of groups in group_normalization()")
   parser.add_argument('--learning_rate',   type=float, default=0.0001)
-  parser.add_argument('--first_ch',        type=int, default=8,
+  parser.add_argument('--first_ch',        type=int, default=16,
     help="first convolution channel")
   parser.add_argument('--ch_mul',nargs='+',type=int, default=[1, 2, 4, 8],
     help="channel multiplier")
@@ -185,7 +185,7 @@ def main():
     # Compile the model
     ddpm.compile(
       loss=keras.losses.MeanSquaredError(),
-      optimizer=keras.optimizers.Adam(learning_rate=learning_rate))
+      optimizer=keras.optimizers.AdamW(learning_rate=learning_rate))
 
     # Train the model
     ddpm.fit(
