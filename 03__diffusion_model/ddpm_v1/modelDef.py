@@ -341,7 +341,7 @@ def build_model(img_size, img_channel, first_conv_channels, widths,
   # MiddleBlock
   x = ResidualBlock(
     widths[-1], groups=norm_groups, activation_fn=activation_fn)([x, temb])
-  x = AttentionBlock(widths[-1], groups=norm_groups)(x)
+  #x = AttentionBlock(widths[-1], groups=norm_groups)(x)
   x = ResidualBlock(
     widths[-1], groups=norm_groups, activation_fn=activation_fn)([x, temb])
 

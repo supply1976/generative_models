@@ -53,7 +53,7 @@ def main():
   first_ch        = FLAGS.first_ch
   ch_mul          = FLAGS.ch_mul
   num_res_blocks  = FLAGS.num_res_blocks  # Number of residual blocks
-  has_attention   = [False, False, True, False]
+  has_attention   = [False, False, False, False]
   assert len(ch_mul)==len(has_attention)
   widths = [first_ch * mult for mult in ch_mul]
     
