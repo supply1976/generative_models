@@ -14,7 +14,7 @@ class GausDiffUtil:
     timesteps: Number of time steps in the forward process
   """
 
-  def __init__(self, beta_start=1e-3, beta_end=0.2, beta_schedule='linear', timesteps=100):
+  def __init__(self, beta_start=1e-4, beta_end=0.02, beta_schedule='linear', timesteps=1000):
     self.beta_start = beta_start
     self.beta_end = beta_end
     self.timesteps = timesteps
@@ -392,8 +392,12 @@ class DiffusionModel(keras.Model):
       # 5. Pass the diffused images and time steps to the network
       pred_noise = self.network([images_t, t], training=True)
 
+      pred_images = self.gausdiff_util.predict_start_from_noise(images_t, t, pred_noise)
+      pred_images = tf.clip_by_value(pred_images, -1, 1)
+
       # 6. Calculate the loss
       loss = self.loss(noise, pred_noise)
+      i_loss = self.loss(images, pred_images)
 
     # 7. Get the gradients
     gradients = tape.gradient(loss, self.network.trainable_weights)
@@ -406,7 +410,7 @@ class DiffusionModel(keras.Model):
       ema_weight.assign(self.ema * ema_weight + (1 - self.ema) * weight)
 
     # 10. Return loss values
-    return {"loss": loss}
+    return {"loss": loss, 'i_loss': i_loss}
 
   def save_model(self, epoch, logs=None, savedir=None):
     epo = str(epoch+1).zfill(4)

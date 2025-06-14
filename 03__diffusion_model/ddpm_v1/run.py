@@ -23,8 +23,8 @@ def main():
   parser.add_argument('--epochs',          type=int, default=20)
   parser.add_argument('--batch_size',      type=int, default=4)
   parser.add_argument('--beta_schedule',   type=str, default='linear')
-  parser.add_argument('--beta_start',      type=float, default=1.0e-3)
-  parser.add_argument('--beta_end',        type=float, default=0.2)
+  parser.add_argument('--beta_start',      type=float, default=1.0e-4)
+  parser.add_argument('--beta_end',        type=float, default=0.02)
   parser.add_argument('--total_timesteps', type=int, default=1000)
   parser.add_argument('--num_res_blocks', type=int, default=2)
   parser.add_argument('--norm_groups',     type=int, default=16, 
@@ -203,8 +203,12 @@ def main():
 
     if FLAGS.given_samples is None:
       # use gaussian random noise to generate images
+      t0 = time.time()
       ddpm.generate_images(
         num_images=FLAGS.num_gen_images, savedir=gen_dir, export_intermediate=False)
+      print("image generation done")
+      deltaT = (time.time() - t0)//1
+      print("time elapsed: {} seconds".format(deltaT))
     else:
       # use external given images (.npz) as input to generate images
       data = np.load(FLAGS.given_samples)
