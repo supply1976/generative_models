@@ -11,7 +11,7 @@ import modelDef
 from data_loader import DataLoader
 
 
-tf.config.optimizer.set_jit(True) # enable XLA
+#tf.config.optimizer.set_jit(True) # enable XLA
 #tf.debugging.disable_traceback_filtering()
 
 # enable_op_determinism() will turn off XLA, and slow down the training time
@@ -53,13 +53,10 @@ class TQDMProgressBar(keras.callbacks.Callback):
   def on_train_batch_end(self, batch, logs=None):
     # global step
     gs = int(self.model.optimizer.iterations.numpy())
-    #lr = float(self.model.optimizer._decayed_lr(tf.float32).numpy())
     lr = float(keras.backend.get_value(self.model.optimizer.learning_rate))
-    loss = logs.get('loss')
     self.pbar.set_postfix({
         'lr': f"{lr:.4e}",
         'gs': gs,
-        'loss': f"{loss:.4f}"
         })
     self.pbar.update(1)
 
@@ -76,9 +73,6 @@ def init_logging(filename, checkpoint=None):
     format="%(message)s",
     handlers=[logging.FileHandler(filename, mode=mode), logging.StreamHandler()],
     )
-
-
-
 
 
 def main():
@@ -130,10 +124,11 @@ def main():
   # hyper-parameters
   epochs          = training_dict['HYPER_PARAMETERS']['EPOCHS']
   batch_size      = training_dict['HYPER_PARAMETERS']['BATCH_SIZE']
+  lr_type         = training_dict['HYPER_PARAMETERS']['LR_TYPE']
   learning_rate   = training_dict['HYPER_PARAMETERS']['LEARNING_RATE']
   warmup_steps    = training_dict['HYPER_PARAMETERS']['WARMUP_STEPS']
   steps_per_epoch = training_dict['HYPER_PARAMETERS']['STEPS_PER_EPOCH']
-  total_steps = epochs * steps_per_epoch
+  total_steps = None if steps_per_epoch is None else epochs * steps_per_epoch
   # for image generation (imgen)
   imgen_model_path = imgen_dict['MODEL_PATH']
   num_gen_images   = imgen_dict['NUM_GEN_IMAGES']
@@ -326,7 +321,7 @@ def main():
       callback_save_ema_latest,
       TQDMProgressBar(),
       #callback_save_ema_best,
-      #callback_genimages,
+      callback_genimages,
       ]
 
     if loss_fn == "MAE":
@@ -336,17 +331,26 @@ def main():
     else:
       raise NotImplementedError
     
-    #
-    #lr_schedule = keras.optimizers.schedules.CosineDecay(
-    #  initial_learning_rate = learning_rate,
-    ##  decay_steps = 10000,
-    #  alpha = 0.0,
-    #  )
-    
-    lr_schedule = WarmUpCosine(
-      base_lr = learning_rate,
-      warmup_steps = warmup_steps,
-      total_steps = total_steps)
+
+    if lr_type == 'constant':
+      lr_schedule = learning_rate
+
+    elif lr_type == 'warmup_cosine':
+      assert warmup_steps is not None
+      lr_schedule = WarmUpCosine(
+        base_lr = learning_rate,
+        warmup_steps = warmup_steps,
+        total_steps = total_steps,
+        )
+
+    elif lr_type == 'cosine_decay':
+      lr_schedule = keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate = learning_rate,
+        decay_steps = 10000,
+        alpha = 0.0,
+        )
+    else:
+      raise NotImplementedError
 
     optimizer = keras.optimizers.AdamW(
       learning_rate = lr_schedule,

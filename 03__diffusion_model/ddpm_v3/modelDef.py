@@ -29,7 +29,7 @@ import gc
 
 #tf.debugging.disable_traceback_filtering()
 #tf.config.run_functions_eagerly(True)
-tf.config.optimizer.set_jit(True) # enable XLA
+#tf.config.optimizer.set_jit(True) # enable XLA
 #tf.config.optimizer.set_experimental_options({"auto_mixed_precision": True})
 #tf.config.optimizer.set_experimental_options({"layout_optimizer": True})
 #tf.config.optimizer.set_experimental_options({"constant_folding": True})
@@ -158,7 +158,7 @@ class DiffusionUtility:
     v_t = mu_t * noise - sigma_t * x_0
     return (x_t, v_t)
   
-  def get_pred_components(self, x_t, t, pred_type, y_pred, clip_denoise=False):
+  def get_pred_components(self, x_t, t, pred_type, y_pred, clip_denoise=True):
     """
       Based on the pred_type, return the predict components
       x_t: 4D tensor 
@@ -270,11 +270,11 @@ class TimeEmbedding(keras.layers.Layer):
 def TimeMLP(units, actf=keras.activations.swish):
   def apply(inputs):
     temb = keras.layers.Dense(units, activation=actf, 
-      #kernel_initializer=kernel_init(1.0),
+      kernel_initializer=kernel_init(1.0),
       )(inputs)
     temb = keras.layers.Dense(
       units, activation=None, 
-      #kernel_initializer=kernel_init(1.0),
+      kernel_initializer=kernel_init(1.0),
       )(temb)
     return temb
   return apply
@@ -332,26 +332,26 @@ def ResidualBlock(width, attention, num_heads, groups, actf):
     else:
       residual = keras.layers.Conv2D(
         filters=width, kernel_size=1, 
-        #kernel_initializer=kernel_init(1.0),
+        kernel_initializer=kernel_init(1.0),
         )(x)
 
     temb = keras.layers.Activation(actf)(t)
     temb = keras.layers.Dense(
       width, 
-      #kernel_initializer=kernel_init(1.0),
+      kernel_initializer=kernel_init(1.0),
       )(temb)
     temb = keras.layers.Reshape([1, 1, -1])(temb)
 
     x = keras.layers.GroupNormalization(groups=groups)(x)
     x = keras.layers.Activation(actf)(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      #kernel_initializer=kernel_init(1.0),
+      kernel_initializer=kernel_init(1.0),
       )(x)
     x = keras.layers.Add()([x, temb])
     x = keras.layers.GroupNormalization(groups=groups)(x)
     x = keras.layers.Activation(actf)(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      #kernel_initializer=kernel_init(0.0),
+      kernel_initializer=kernel_init(0.0),
       )(x)
     x = keras.layers.Add()([x, residual])
     # check attention
@@ -369,7 +369,7 @@ def DownSample(width):
   def apply(x):
     x = keras.layers.Conv2D(width, kernel_size=3, strides=2, 
       padding="same", 
-      #kernel_initializer=kernel_init(1.0),
+      kernel_initializer=kernel_init(1.0),
       )(x)
     return x
   return apply
@@ -379,7 +379,7 @@ def UpSample(width, interpolation="nearest"):
   def apply(x):
     x = keras.layers.UpSampling2D(size=2, interpolation=interpolation)(x)
     x = keras.layers.Conv2D(width, kernel_size=3, padding="same",
-      #kernel_initializer=kernel_init(1.0),
+      kernel_initializer=kernel_init(1.0),
       )(x)
     return x
   return apply
@@ -450,10 +450,10 @@ def build_model(
     filters=widths[0],
     kernel_size=(3, 3),
     padding="same",
-    #kernel_initializer=kernel_init(1.0),
+    kernel_initializer=kernel_init(1.0),
     )(x)
   
-  temb = TimeEmbedding(dim=temb_dim)(time_input)
+  temb = TimeEmbedding(dim=temb_dim, name="TimeEmb")(time_input)
   temb = TimeMLP(units=temb_dim, actf=actf)(temb)
 
   skips = [x]
@@ -472,7 +472,7 @@ def build_model(
 
   # MiddleBlock
   x = ResidualBlock(
-    widths[-1], has_attention[-1], num_heads=num_heads,
+    widths[-1], False, num_heads=num_heads,
     groups=norm_groups, actf=actf)([x, temb])
   
   x = ResidualBlock(
@@ -493,7 +493,7 @@ def build_model(
   x = keras.layers.GroupNormalization(groups=norm_groups)(x)
   x = keras.layers.Activation(actf)(x)
   x = keras.layers.Conv2D(image_channel*(block_size**2), (3, 3), padding="same", 
-    #kernel_initializer=kernel_init(0.0),
+    kernel_initializer=kernel_init(0.0),
     name="final_conv2d",
     )(x)
   
@@ -520,7 +520,7 @@ class DiffusionModel(keras.Model):
 
   @property
   def metrics(self):
-    return [self.loss_tracker, 
+    return [self.loss_tracker,
             self.noise_loss_tracker, 
             self.image_loss_tracker, 
             self.velocity_loss_tracker,
@@ -561,14 +561,16 @@ class DiffusionModel(keras.Model):
     # Get the gradients of the loss with respect to the model's trainable weights
     # update the weights of the network
     gradients = tape.gradient(loss, self.network.trainable_weights)
+    
     # Apply gradient clip
     clipped_grads = [
       tf.clip_by_norm(g, clip_norm=1.0) if g is not None else None
       for g in gradients
     ]
-
+    
     #self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
     self.optimizer.apply_gradients(zip(clipped_grads, self.network.trainable_weights))
+    
     # Update EMA weights
     self._update_ema_weights()
 
@@ -579,7 +581,8 @@ class DiffusionModel(keras.Model):
     self.velocity_loss_tracker.update_state(velocity_loss)
 
     # Return loss values
-    return {m.name: m.result() for m in self.metrics}
+    metrics_dict = {m.name: m.result() for m in self.metrics}
+    return metrics_dict
 
   @tf.function
   def _update_ema_weights(self):
@@ -677,7 +680,7 @@ class DiffusionModel(keras.Model):
         f.write(frozen_graph_def.SerializeToString())
   
   def generate_images(self, epoch=None, logs=None, 
-    savedir='./', num_images=16, clip_denoise=False, 
+    savedir='./', num_images=20, clip_denoise=True, 
     gen_inputs=None, _freeze_ini=False, export_interm=False,
     ):
     #
