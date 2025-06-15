@@ -32,8 +32,10 @@ def png_transform(batch):
 
 
 def make_grid(images, rows, cols):
+  # PIL Image
   w, h = images[0].size
-  grid = PIL.Image.new('L', size=(cols*w, rows*h))
+  mode = images[0].mode
+  grid = PIL.Image.new(mode, size=(cols*w, rows*h))
   for i, image in enumerate(images):
     grid.paste(image, box=(i%cols*w, i//cols*h))
   return grid
@@ -44,7 +46,7 @@ def image_gen(config, epoch, pipeline):
     batch_size = config.eval_batch_size,
     generator = torch.manual_seed(config.seed)
   )[0]
-
+  # pipeline return PIL Image
   image_grid = make_grid(images, rows=2, cols=2)
 
   test_dir = os.path.join(config.output_dir, "samples")
@@ -167,21 +169,21 @@ class NPZdataset(torch.utils.data.Dataset):
     
 @dataclass(order=True, frozen=True)
 class TrainingConfig:
-  image_size: int = 512
-  image_channels: int = 2
+  image_size: int = 256
+  image_channels: int = 3
   first_conv_channel: int = 128
   channel_multiplier: tuple = (1, 1, 2, 2, 4, 4)
   block_out_channels: tuple = (128, 128, 256, 256, 512, 512)
   train_batch_size: int = 4
   eval_batch_size: int = 4
-  num_epochs: int = 500
+  num_epochs: int = 1000
   gradient_accumulation_steps: int = 1
   learning_rate: float = 1.0e-4
-  lr_warmup_steps: int = 10000
+  lr_warmup_steps: int = 50000
   save_image_epochs: int = 50
   save_model_epochs: int = 50
   mixed_precision: str = 'no'
-  output_dir: str = 'mydataset_IMEC_metalHV_512x2_run01'
+  output_dir: str = 'mydataset_flowers102_256_run01'
   overwrite_output_dir: bool = True
   seed: int = 0
 
@@ -193,8 +195,16 @@ def main():
   #dataset.set_transform(png_transform)
   
   #npz_file = "/remote/ltg_proj02_us01/user/richwu/datasets_for_ML_prototypes/metal_test1/pitch_8_512x512x1/all_images_713x512x512x1.npz"
-  data_folder = "/remote/ltg_proj02_us01/user/richwu/datasets_for_ML_prototypes/IMEC_metalHV_for_lowNA_euv/npz_files/rast_ETCH_KERNEL"
-  dataset = NPZdataset(data_folder)
+  
+  npz_file = "/home/tacowu/mydatasets/flowers102/flowers102_1020x256x256x3.npz"
+  images = np.load(npz_file)['images']
+  images = np.transpose(images, [0, 3, 1, 2])
+  images = 2.0 * images - 1.0
+
+  dataset = NumpyDataset(images)
+
+  #data_folder = "/home/tacowu/mydatasets/flowers102/flowers102_1020x256x256x3.npz"
+  #dataset = NPZdataset(data_folder)
 
 
   #######
