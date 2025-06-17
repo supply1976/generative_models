@@ -88,7 +88,8 @@ def parse_config(config_path):
 
 
 def build_models(image_size, image_channel, widths, has_attention,
-                 num_heads, num_res_blocks, norm_groups, block_size, temb_dim):
+                 num_heads, num_res_blocks, norm_groups, block_size, temb_dim,
+                 dropout_rate=0.0, kernel_size=3, use_cross_attention=False):
   kwargs = dict(
       image_size=image_size,
       image_channel=image_channel,
@@ -100,6 +101,9 @@ def build_models(image_size, image_channel, widths, has_attention,
       actf=keras.activations.swish,
       block_size=block_size,
       temb_dim=temb_dim,
+      dropout_rate=dropout_rate,
+      kernel_size=kernel_size,
+      use_cross_attention=use_cross_attention,
   )
   network = modelDef.build_model(**kwargs)
   ema_network = modelDef.build_model(**kwargs)
@@ -172,6 +176,9 @@ def main():
   assert len(channel_multiplier)==len(has_attention)
   widths = [first_channel * mult for mult in channel_multiplier]
   temb_dim           = training_dict['NETWORK']['TIME_EMB_DIM']
+  dropout_rate       = training_dict['NETWORK'].get('DROPOUT_RATE', 0.0)
+  kernel_size        = training_dict['NETWORK'].get('KERNEL_SIZE', 3)
+  use_cross_attention = training_dict['NETWORK'].get('USE_CROSS_ATTENTION', False)
 
   # hyper-parameters
   epochs          = training_dict['HYPER_PARAMETERS']['EPOCHS']
@@ -209,6 +216,9 @@ def main():
     norm_groups=norm_groups,
     block_size=block_size,
     temb_dim=temb_dim,
+    dropout_rate=dropout_rate,
+    kernel_size=kernel_size,
+    use_cross_attention=use_cross_attention,
   )
 
   network.summary()

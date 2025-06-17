@@ -79,7 +79,8 @@ class DepthToSpaceLayer(keras.layers.Layer):
         return cls(**config)
 
 
-def ResidualBlock(width, attention, num_heads, groups, actf):
+def ResidualBlock(width, attention, num_heads, groups, actf,
+                  dropout_rate=0.0, kernel_size=3, use_cross_attention=False):
     def apply(inputs):
         x, t = inputs
         input_width = x.shape[3]
@@ -94,16 +95,26 @@ def ResidualBlock(width, attention, num_heads, groups, actf):
 
         x = keras.layers.GroupNormalization(groups=groups)(x)
         x = keras.layers.Activation(actf)(x)
-        x = keras.layers.Conv2D(width, kernel_size=3, padding="same", kernel_initializer=kernel_init(1.0))(x)
+        x = keras.layers.Conv2D(width, kernel_size=kernel_size, padding="same", kernel_initializer=kernel_init(1.0))(x)
         x = keras.layers.Add()([x, temb])
+        if dropout_rate:
+            x = keras.layers.Dropout(dropout_rate)(x)
         x = keras.layers.GroupNormalization(groups=groups)(x)
         x = keras.layers.Activation(actf)(x)
-        x = keras.layers.Conv2D(width, kernel_size=3, padding="same", kernel_initializer=kernel_init(0.0))(x)
+        x = keras.layers.Conv2D(width, kernel_size=kernel_size, padding="same", kernel_initializer=kernel_init(0.0))(x)
         x = keras.layers.Add()([x, residual])
         if attention:
             res_output = x
             x = keras.layers.GroupNormalization(groups=groups)(x)
-            x = keras.layers.MultiHeadAttention(num_heads=num_heads, key_dim=width, attention_axes=(1, 2))(x, x)
+            if use_cross_attention:
+                ctx = tf.broadcast_to(temb, tf.shape(x))
+                x = keras.layers.MultiHeadAttention(
+                    num_heads=num_heads, key_dim=width, attention_axes=(1, 2)
+                )(x, ctx)
+            else:
+                x = keras.layers.MultiHeadAttention(
+                    num_heads=num_heads, key_dim=width, attention_axes=(1, 2)
+                )(x, x)
             x = keras.layers.Add()([x, res_output])
         return x
     return apply
