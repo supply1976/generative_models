@@ -1,12 +1,18 @@
-import os, sys, argparse, shutil, logging
-import math, time, datetime, yaml
+import os
+import argparse
+import shutil
+import logging
+import datetime
+import time
+import yaml
 import numpy as np
 import tensorflow as tf
+
 tf.get_logger().setLevel("ERROR")
 from tensorflow import keras
 from tensorflow.keras.callbacks import CSVLogger
 from tqdm import tqdm
-#
+
 import modelDef
 from data_loader import DataLoader
 
@@ -75,6 +81,57 @@ def init_logging(filename, checkpoint=None):
     )
 
 
+def parse_config(config_path):
+  with open(config_path, 'r') as f:
+    cfg = yaml.safe_load(f)
+  return cfg['DATASET'], cfg['TRAINING'], cfg['IMAGE_GENERATION']
+
+
+def build_models(image_size, image_channel, widths, has_attention,
+                 num_heads, num_res_blocks, norm_groups, block_size, temb_dim):
+  kwargs = dict(
+      image_size=image_size,
+      image_channel=image_channel,
+      widths=widths,
+      has_attention=has_attention,
+      num_heads=num_heads,
+      num_res_blocks=num_res_blocks,
+      norm_groups=norm_groups,
+      actf=keras.activations.swish,
+      block_size=block_size,
+      temb_dim=temb_dim,
+  )
+  network = modelDef.build_model(**kwargs)
+  ema_network = modelDef.build_model(**kwargs)
+  ema_network.set_weights(network.get_weights())
+  return network, ema_network
+
+
+def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None):
+  if os.path.isdir(dataset_path):
+    dataloader = DataLoader(
+        data_dir=dataset_path,
+        img_size=img_size,
+        crop_size=crop_size,
+    )
+    train_ds, valid_ds = dataloader._get_dataset()
+  else:
+    all_images = np.load(dataset_path)['images']
+    all_images = 2 * all_images - 1.0
+    idx = np.arange(len(all_images))
+    np.random.shuffle(idx)
+    num_val = int(0.1 * len(all_images))
+    train_ds = tf.data.Dataset.from_tensor_slices(all_images)
+    train_ds = train_ds.cache().shuffle(buffer_size=10000).repeat()
+    valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val]).cache()
+
+  train_ds = train_ds.batch(batch_size, drop_remainder=True)
+  train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+  valid_ds = valid_ds.batch(batch_size)
+  valid_ds = valid_ds.prefetch(tf.data.AUTOTUNE)
+  return train_ds, valid_ds
+
+
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument("--config", type=str, required=True)
@@ -82,13 +139,8 @@ def main():
   parser.add_argument("--imgen", dest='imgen', action='store_true')
   parser.add_argument("--clip_denoise", action='store_true')
   FLAGS, _ = parser.parse_known_args()
-  
-  with open(FLAGS.config, 'r') as f:
-    config_dict = yaml.safe_load(f)
 
-  dataset_dict   = config_dict['DATASET']
-  training_dict  = config_dict['TRAINING']
-  imgen_dict     = config_dict['IMAGE_GENERATION']
+  dataset_dict, training_dict, imgen_dict = parse_config(FLAGS.config)
 
   # dataset
   dataset_name   = dataset_dict['NAME']
@@ -147,35 +199,19 @@ def main():
   if gpus: [tf.config.experimental.set_memory_growth(gpu, True) for gpu in gpus]
 
   # Build (initialize) the unet model
-  network = modelDef.build_model(
-    image_size     = input_image_size, 
-    image_channel  = input_image_channel,
-    widths         = widths,
-    has_attention  = has_attention,
-    num_heads      = num_heads,
-    num_res_blocks = num_res_blocks,
-    norm_groups    = norm_groups,
-    actf           = keras.activations.swish,
-    block_size     = block_size,
-    temb_dim       = temb_dim,
-    )
-  
-  ema_network = modelDef.build_model(
-    image_size     = input_image_size, 
-    image_channel  = input_image_channel,
-    widths         = widths,
-    has_attention  = has_attention,
-    num_heads      = num_heads,
-    num_res_blocks = num_res_blocks,
-    norm_groups    = norm_groups,
-    actf           = keras.activations.swish,
-    block_size     = block_size,
-    temb_dim       = temb_dim,
-    )
+  network, ema_network = build_models(
+    image_size=input_image_size,
+    image_channel=input_image_channel,
+    widths=widths,
+    has_attention=has_attention,
+    num_heads=num_heads,
+    num_res_blocks=num_res_blocks,
+    norm_groups=norm_groups,
+    block_size=block_size,
+    temb_dim=temb_dim,
+  )
 
   network.summary()
-  # Initially the weights are the same
-  ema_network.set_weights(network.get_weights())  
 
   # Get an instance of the Gaussian Diffusion utilities
   # util for training
@@ -251,40 +287,12 @@ def main():
     
     assert dataset_path is not None
     logging.info("[INFO] User defined dataset name:{}".format(dataset_name))
-    if os.path.isdir(dataset_path):
-      logging.info("[INFO] Use a folder contains multiple npz files for training")
-      logging.info("[INFO] Dataset path: {}".format(dataset_path))
-      dataloader = DataLoader(
-        data_dir=dataset_path,
-        img_size = input_image_size,
-        crop_size=crop_size,
-        )
-      train_ds, valid_ds = dataloader._get_dataset()
-    else:
-      assert os.path.isfile(dataset_path)
-      assert dataset_path.endswith(".npz")
-      logging.info("[INFO] Use single (big) npz file for training")
-      all_images = np.load(dataset_path)['images']
-      all_images = 2*(all_images) - 1.0  ; # (0, 1) -> (-1, 1)
-      idx = np.arange(len(all_images))
-      np.random.shuffle(idx)
-      num_val = int(0.1*len(all_images))
-      # train dataset
-      train_ds = tf.data.Dataset.from_tensor_slices(all_images)
-      train_ds = (
-        train_ds
-          .cache()
-          .shuffle(buffer_size=10000)
-          .repeat()
-        )
-      #
-      valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val])
-      valid_ds = valid_ds.cache()
-    
-    train_ds = train_ds.batch(batch_size, drop_remainder=True)
-    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-    valid_ds = valid_ds.batch(batch_size)
-    valid_ds = valid_ds.prefetch(tf.data.AUTOTUNE)
+    train_ds, valid_ds = prepare_datasets(
+      dataset_path,
+      img_size=input_image_size,
+      batch_size=batch_size,
+      crop_size=crop_size,
+    )
       
     # get input image shape
     for x in train_ds.take(1):
