@@ -20,7 +20,7 @@ def get_metric(model, valset, tanh_norm=True, trainer_type="fit"):
     mses = []
     psnrs = []
     adrs = []
-    if trainer_type is not "fit":
+    if trainer_type != "fit":
         valset = zip(*valset)
     for img_A, real_B in valset:
         fake_B = model.predict(img_A)
