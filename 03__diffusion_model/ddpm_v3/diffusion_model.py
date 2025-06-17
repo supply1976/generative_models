@@ -123,6 +123,19 @@ class DiffusionModel(keras.Model):
         with tf.io.gfile.GFile(frozen_graph_path, "wb") as f:
             f.write(frozen_graph_def.SerializeToString())
 
+    @tf.function
+    def _denoise_step(self, samples, t, clip_denoise):
+        """Run one reverse diffusion step."""
+        tt = tf.fill((tf.shape(samples)[0],), t)
+        y_pred = self.ema_network([samples, tt], training=False)
+        pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
+            samples, tt, self.diff_util.pred_type, y_pred, clip_denoise=clip_denoise
+        )
+        pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(
+            pred_image, samples, tt, pred_noise=pred_noise
+        )
+        return self.diff_util.p_sample(pred_mean, pred_sigma)
+
     def generate_images(
         self,
         epoch=None,
@@ -153,21 +166,11 @@ class DiffusionModel(keras.Model):
             self.timesteps, 0, -self.diff_util.reverse_stride, dtype=np.int32
         )
         for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
-            tt = tf.fill(n_imgs, t)
-            y_pred = self.ema_network.predict([samples, tt], verbose=0, batch_size=16)
-            pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
-                samples, tt, self.diff_util.pred_type, y_pred, clip_denoise=clip_denoise
-            )
-            pred_mean, pred_sigma = self.diff_util.q_reverse_mean_sigma(
-                pred_image, samples, tt, pred_noise=pred_noise
-            )
-            samples = self.diff_util.p_sample(pred_mean, pred_sigma)
+            samples = self._denoise_step(samples, tf.constant(t, dtype=tf.int32), clip_denoise)
             if _freeze_ini:
                 samples = samples.numpy()
                 samples[:, 0:_h//2, 0:_w//2, :] = ini_samples[:, 0:_h//2, 0:_w//2, :]
                 samples = tf.convert_to_tensor(samples)
-            del pred_mean, pred_sigma, pred_noise, pred_image, pred_velocity, y_pred
-            keras.backend.clear_session()
             gc.collect()
             try:
                 mem = tf.config.experimental.get_memory_info("GPU:0")
