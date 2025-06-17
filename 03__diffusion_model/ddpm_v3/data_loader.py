@@ -67,8 +67,9 @@ class DataLoader:
       self.h, self.w, self.c = arr.shape
 
       if self.crop_size is not None:
-        llx = (h - self.crop_size)//2
-        lly = (w - self.crop_size)//2
+        h, w, _ = arr.shape
+        llx = (h - self.crop_size) // 2
+        lly = (w - self.crop_size) // 2
         urx = llx + self.crop_size
         ury = lly + self.crop_size
         arr = arr[llx:urx, lly:ury, :]
