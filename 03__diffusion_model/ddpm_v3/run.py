@@ -111,7 +111,7 @@ def build_models(image_size, image_channel, widths, has_attention,
   return network, ema_network
 
 
-def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None):
+def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None, dtype=tf.float32):
   if os.path.isdir(dataset_path):
     dataloader = DataLoader(
         data_dir=dataset_path,
@@ -130,8 +130,10 @@ def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None):
     valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val]).cache()
 
   train_ds = train_ds.batch(batch_size, drop_remainder=True)
+  train_ds = train_ds.map(lambda x: tf.cast(x, dtype), num_parallel_calls=tf.data.AUTOTUNE)
   train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
   valid_ds = valid_ds.batch(batch_size)
+  valid_ds = valid_ds.map(lambda x: tf.cast(x, dtype), num_parallel_calls=tf.data.AUTOTUNE)
   valid_ds = valid_ds.prefetch(tf.data.AUTOTUNE)
   return train_ds, valid_ds
 
@@ -142,7 +144,19 @@ def main():
   parser.add_argument("--training", dest='training', action='store_true')
   parser.add_argument("--imgen", dest='imgen', action='store_true')
   parser.add_argument("--clip_denoise", action='store_true')
+  parser.add_argument("--mixed_precision", action='store_true',
+                      help='Enable mixed float16 training')
+  parser.add_argument("--enable_xla", action='store_true',
+                      help='Enable XLA JIT compilation')
   FLAGS, _ = parser.parse_known_args()
+
+  if FLAGS.mixed_precision:
+    from tensorflow.keras import mixed_precision
+    mixed_precision.set_global_policy("mixed_float16")
+  if FLAGS.enable_xla:
+    tf.config.optimizer.set_jit(True)
+
+  dtype = tf.float16 if FLAGS.mixed_precision else tf.float32
 
   dataset_dict, training_dict, imgen_dict = parse_config(FLAGS.config)
 
@@ -302,6 +316,7 @@ def main():
       img_size=input_image_size,
       batch_size=batch_size,
       crop_size=crop_size,
+      dtype=dtype,
     )
       
     # get input image shape
