@@ -25,8 +25,52 @@ def build_model(
     actf=keras.activations.swish,
     block_size=2,
     temb_dim=128,
+    dropout_rate=0.0,
+    kernel_size=3,
+    use_cross_attention=False,
 ):
-    """Build UNet model."""
+    """Build UNet model.
+
+    Parameters
+    ----------
+    image_size : int, optional
+        Spatial resolution of the input and output tensors. Default ``256``.
+    image_channel : int, optional
+        Number of channels in the input image. Default ``1``.
+    widths : list[int], optional
+        Channel widths for each resolution level. Default ``[32, 64, 128, 256]``.
+    has_attention : list[bool], optional
+        Whether to apply self-attention at each level. Length must match
+        ``widths``. Default ``[False, False, False, True]``.
+    num_heads : int, optional
+        Number of attention heads when attention is enabled. Default ``1``.
+    num_res_blocks : int, optional
+        Number of residual blocks at each level. Default ``2``.
+    norm_groups : int, optional
+        Number of groups for ``GroupNormalization``. Default ``32``.
+    interpolation : str, optional
+        Upsampling interpolation method. Default ``"nearest"``.
+    actf : Callable, optional
+        Activation function used throughout the network.
+        Default ``keras.activations.swish``.
+    block_size : int, optional
+        Space-to-depth scaling factor. Default ``2``.
+    temb_dim : int, optional
+        Dimension of the time embedding. Default ``128``.
+    dropout_rate : float, optional
+        Dropout rate applied inside residual blocks. ``0.0`` disables dropout.
+    kernel_size : int or tuple[int, int], optional
+        Convolution kernel size used for all convolutions. Default ``3``.
+    use_cross_attention : bool, optional
+        If ``True``, attention blocks use cross-attention with the time
+        embeddings. Default ``False``.
+
+    Returns
+    -------
+    keras.Model
+        Model that maps ``[image, timestep]`` inputs to an image tensor of
+        shape ``(batch, image_size, image_size, image_channel)``.
+    """
     if not isinstance(image_size, int) or image_size <= 0:
         raise ValueError("`image_size` must be a positive integer.")
     if not isinstance(image_channel, int) or image_channel <= 0:
@@ -51,6 +95,22 @@ def build_model(
         raise ValueError("`block_size` must be a positive integer.")
     if not isinstance(temb_dim, int) or temb_dim <= 0:
         raise ValueError("`temb_dim` must be a positive integer.")
+    if not isinstance(dropout_rate, (int, float)) or not 0 <= dropout_rate <= 1:
+        raise ValueError("`dropout_rate` must be between 0 and 1.")
+    if isinstance(kernel_size, int):
+        if kernel_size <= 0:
+            raise ValueError("`kernel_size` must be positive.")
+        kernel_size = (kernel_size, kernel_size)
+    elif (
+        isinstance(kernel_size, (list, tuple))
+        and len(kernel_size) == 2
+        and all(isinstance(k, int) and k > 0 for k in kernel_size)
+    ):
+        kernel_size = tuple(kernel_size)
+    else:
+        raise ValueError("`kernel_size` must be an int or tuple of two ints.")
+    if not isinstance(use_cross_attention, bool):
+        raise ValueError("`use_cross_attention` must be a boolean.")
 
     input_shape = (image_size, image_size, image_channel)
     image_input = keras.Input(shape=input_shape, name="image_input")
@@ -64,7 +124,7 @@ def build_model(
 
     x = keras.layers.Conv2D(
         filters=widths[0],
-        kernel_size=(3, 3),
+        kernel_size=kernel_size,
         padding="same",
         kernel_initializer=kernel_init(1.0),
     )(x)
@@ -77,20 +137,54 @@ def build_model(
     for i in range(len(widths)):
         for _ in range(num_res_blocks):
             x = ResidualBlock(
-                widths[i], has_attention[i], num_heads=num_heads, groups=norm_groups, actf=actf
+                widths[i],
+                has_attention[i],
+                num_heads=num_heads,
+                groups=norm_groups,
+                actf=actf,
+                dropout_rate=dropout_rate,
+                kernel_size=kernel_size,
+                use_cross_attention=use_cross_attention,
             )([x, temb])
             skips.append(x)
         if i != len(widths) - 1:
             x = DownSample(widths[i])(x)
             skips.append(x)
 
-    x = ResidualBlock(widths[-1], False, num_heads=num_heads, groups=norm_groups, actf=actf)([x, temb])
-    x = ResidualBlock(widths[-1], False, num_heads=num_heads, groups=norm_groups, actf=actf)([x, temb])
+    x = ResidualBlock(
+        widths[-1],
+        False,
+        num_heads=num_heads,
+        groups=norm_groups,
+        actf=actf,
+        dropout_rate=dropout_rate,
+        kernel_size=kernel_size,
+        use_cross_attention=use_cross_attention,
+    )([x, temb])
+    x = ResidualBlock(
+        widths[-1],
+        False,
+        num_heads=num_heads,
+        groups=norm_groups,
+        actf=actf,
+        dropout_rate=dropout_rate,
+        kernel_size=kernel_size,
+        use_cross_attention=use_cross_attention,
+    )([x, temb])
 
     for i in reversed(range(len(widths))):
         for _ in range(num_res_blocks + 1):
             x = keras.layers.Concatenate(axis=-1)([x, skips.pop()])
-            x = ResidualBlock(widths[i], has_attention[i], num_heads=num_heads, groups=norm_groups, actf=actf)([x, temb])
+            x = ResidualBlock(
+                widths[i],
+                has_attention[i],
+                num_heads=num_heads,
+                groups=norm_groups,
+                actf=actf,
+                dropout_rate=dropout_rate,
+                kernel_size=kernel_size,
+                use_cross_attention=use_cross_attention,
+            )([x, temb])
         if i != 0:
             x = UpSample(widths[i], interpolation=interpolation)(x)
 
@@ -98,7 +192,7 @@ def build_model(
     x = keras.layers.Activation(actf)(x)
     x = keras.layers.Conv2D(
         image_channel * (block_size ** 2),
-        (3, 3),
+        kernel_size,
         padding="same",
         kernel_initializer=kernel_init(0.0),
         name="final_conv2d",

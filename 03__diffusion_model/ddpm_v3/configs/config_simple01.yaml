@@ -31,6 +31,9 @@ TRAINING:
     CHANNEL_MULTIPLIER: [1, 2, 4, 8]
     HAS_ATTENTION: [False, False, False, False]
     NUM_HEADS: 1
+    DROPOUT_RATE: 0.1
+    KERNEL_SIZE: 3
+    USE_CROSS_ATTENTION: false
   OUTPUT_DIR: "./training_outputs"
 
 IMAGE_GENERATION:
