@@ -16,6 +16,7 @@ from tqdm import tqdm
 import modelDef
 from data_loader import DataLoader
 from dtype_util import get_compute_dtype
+from tensorflow.keras.mixed_precision import LossScaleOptimizer
 
 
 #tf.config.optimizer.set_jit(True) # enable XLA
@@ -389,10 +390,11 @@ def main():
     else:
       raise NotImplementedError
 
-    optimizer = keras.optimizers.AdamW(
+    base_optimizer = keras.optimizers.AdamW(
       learning_rate = lr_schedule,
       #weight_decay=1.0e-5,
       )
+    optimizer = LossScaleOptimizer(base_optimizer) if FLAGS.mixed_precision else base_optimizer
 
     # Compile the model
     ddpm.compile(loss=loss_fn,optimizer=optimizer)
