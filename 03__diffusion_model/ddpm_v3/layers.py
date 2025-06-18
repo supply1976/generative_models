@@ -1,5 +1,6 @@
 import tensorflow as tf
 from tensorflow import keras
+from dtype_util import get_compute_dtype
 
 
 def kernel_init(scale):
@@ -17,7 +18,7 @@ class TimeEmbedding(keras.layers.Layer):
         self.dim = dim
 
     def call(self, inputs):
-        inputs = tf.cast(inputs, dtype=tf.float32)
+        inputs = tf.cast(inputs, dtype=get_compute_dtype())
         if len(inputs.shape) != 1:
             raise ValueError("Input tensor must be 1D.")
         emb = tf.exp(tf.linspace(0.0, 1.0, self.dim // 2) * -tf.math.log(10000.0))

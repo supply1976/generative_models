@@ -1,6 +1,7 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+from dtype_util import get_compute_dtype
 
 
 class DiffusionUtility:
@@ -46,9 +47,10 @@ class DiffusionUtility:
         mu_coefs = np.sqrt(alphas)
         var_coefs = 1.0 - alphas
         sigma_coefs = np.sqrt(var_coefs)
-        self.mu_coefs = tf.constant(mu_coefs, tf.float32)
-        self.var_coefs = tf.constant(var_coefs, tf.float32)
-        self.sigma_coefs = tf.constant(sigma_coefs, tf.float32)
+        dtype = get_compute_dtype()
+        self.mu_coefs = tf.constant(mu_coefs, dtype)
+        self.var_coefs = tf.constant(var_coefs, dtype)
+        self.sigma_coefs = tf.constant(sigma_coefs, dtype)
 
         alpha_t = alphas[reverse_stride:]
         alpha_s = alphas[0:-reverse_stride]
@@ -67,11 +69,11 @@ class DiffusionUtility:
         reverse_mu_ddpm_x0 = np.insert(reverse_mu_ddpm_x0, 0, [1.0] * reverse_stride)
         reverse_mu_ddim_x0 = np.insert(reverse_mu_ddim_x0, 0, [1.0] * reverse_stride)
         reverse_mu_ddim_noise = np.insert(reverse_mu_ddim_noise, 0, [0.0] * reverse_stride)
-        self.reverse_sigma_coefs = tf.constant(reverse_sigma_coefs, tf.float32)
-        self.reverse_mu_ddpm_xt = tf.constant(reverse_mu_ddpm_xt, tf.float32)
-        self.reverse_mu_ddpm_x0 = tf.constant(reverse_mu_ddpm_x0, tf.float32)
-        self.reverse_mu_ddim_x0 = tf.constant(reverse_mu_ddim_x0, tf.float32)
-        self.reverse_mu_ddim_noise = tf.constant(reverse_mu_ddim_noise, tf.float32)
+        self.reverse_sigma_coefs = tf.constant(reverse_sigma_coefs, dtype)
+        self.reverse_mu_ddpm_xt = tf.constant(reverse_mu_ddpm_xt, dtype)
+        self.reverse_mu_ddpm_x0 = tf.constant(reverse_mu_ddpm_x0, dtype)
+        self.reverse_mu_ddim_x0 = tf.constant(reverse_mu_ddim_x0, dtype)
+        self.reverse_mu_ddim_noise = tf.constant(reverse_mu_ddim_noise, dtype)
 
     def q_sample(self, x_0, t, noise):
         sigma_t = tf.gather(self.sigma_coefs, t)[:, None, None, None]
@@ -116,7 +118,7 @@ class DiffusionUtility:
         return (_mean, _sigma)
 
     def p_sample(self, pred_mean, pred_sigma):
-        noise = tf.random.normal(shape=pred_mean.shape, dtype=tf.float32)
+        noise = tf.random.normal(shape=pred_mean.shape, dtype=get_compute_dtype())
         x_s = pred_mean + pred_sigma * noise
         return x_s
 
