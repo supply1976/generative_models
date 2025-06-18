@@ -4,6 +4,7 @@ import numpy as np
 from functools import partial
 import tensorflow as tf
 from tensorflow import keras
+from dtype_util import get_compute_dtype
 
 
 class DataLoader:
@@ -76,7 +77,7 @@ class DataLoader:
         
       arr = (arr) *(self.CLIP_MAX-self.CLIP_MIN) + self.CLIP_MIN
       return arr
-    img = tf.numpy_function(_preprocess, [path], tf.float32)
+    img = tf.numpy_function(_preprocess, [path], get_compute_dtype())
     img_size = self.img_size if self.crop_size is None else self.crop_size
     img = tf.ensure_shape(img, [img_size, img_size, None])
     
