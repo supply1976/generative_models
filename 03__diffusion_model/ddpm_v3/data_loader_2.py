@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
+from dtype_util import get_compute_dtype
 
 logging.basicConfig(level=logging.INFO)
 
@@ -98,7 +99,7 @@ class DataLoader:
                 self.CLIP_MIN,
                 self.CLIP_MAX,
             )
-        img = tf.numpy_function(_wrapped_preprocess, [path], tf.float32)
+        img = tf.numpy_function(_wrapped_preprocess, [path], get_compute_dtype())
         img_size = self.img_size if self.crop_size is None else self.crop_size
         img = tf.ensure_shape(img, [img_size, img_size, None])
         return img
