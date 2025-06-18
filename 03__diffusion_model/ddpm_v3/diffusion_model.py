@@ -4,6 +4,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 import tqdm
+from dtype_util import get_compute_dtype
 
 
 class DiffusionModel(keras.Model):
@@ -152,7 +153,7 @@ class DiffusionModel(keras.Model):
         _, img_size, _, img_channel = img_input.shape
         if gen_inputs is None:
             _shape = (num_images, img_size, img_size, img_channel)
-            samples = tf.random.normal(shape=_shape, dtype=tf.float32)
+            samples = tf.random.normal(shape=_shape, dtype=get_compute_dtype())
         else:
             samples = gen_inputs
         n_imgs, _h, _w, _ = samples.shape

@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 import modelDef
 from data_loader import DataLoader
+from dtype_util import get_compute_dtype
 
 
 #tf.config.optimizer.set_jit(True) # enable XLA
@@ -35,10 +36,11 @@ class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
 
   def __call__(self, step):
     # Linear warmup
-    warmup_lr = self.base_lr * tf.cast(step, tf.float32)/tf.cast(self.warmup_steps, tf.float32)
+    dtype = get_compute_dtype()
+    warmup_lr = self.base_lr * tf.cast(step, dtype)/tf.cast(self.warmup_steps, dtype)
     # Cosine decay
-    cosine_steps = tf.cast(step - self.warmup_steps, tf.float32)
-    cosine_total = tf.cast(self.total_steps - self.warmup_steps, tf.float32)
+    cosine_steps = tf.cast(step - self.warmup_steps, dtype)
+    cosine_total = tf.cast(self.total_steps - self.warmup_steps, dtype)
     cosine_decay = 0.5 * (1 + tf.cos(np.pi * cosine_steps / cosine_total))
     decayed = (self.base_lr - self.min_lr) * cosine_decay + self.min_lr
     lr = tf.where(step < self.warmup_steps, warmup_lr, decayed)
@@ -111,7 +113,9 @@ def build_models(image_size, image_channel, widths, has_attention,
   return network, ema_network
 
 
-def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None, dtype=tf.float32):
+def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None, dtype=None):
+  if dtype is None:
+    dtype = get_compute_dtype()
   if os.path.isdir(dataset_path):
     dataloader = DataLoader(
         data_dir=dataset_path,
@@ -156,7 +160,7 @@ def main():
   if FLAGS.enable_xla:
     tf.config.optimizer.set_jit(True)
 
-  dtype = tf.float16 if FLAGS.mixed_precision else tf.float32
+  dtype = get_compute_dtype()
 
   dataset_dict, training_dict, imgen_dict = parse_config(FLAGS.config)
 
@@ -449,20 +453,20 @@ def main():
       logging.info("Use external .npz file as start to generate images")
       logging.info("Generating Images from {}".format(gen_inputs))
       data = np.load(gen_inputs)['images']
-      gen_inputs = tf.identity(data, tf.float32)
+      gen_inputs = tf.identity(data, get_compute_dtype())
     
     elif gen_inputs == "identical_noise":
       logging.info("Generating Images from identical Gaussian noise")
       _shape=(1, input_image_size, input_image_size, input_image_channel)
-      gen_inputs = tf.random.normal(shape=_shape, dtype=tf.float32)
+      gen_inputs = tf.random.normal(shape=_shape, dtype=get_compute_dtype())
       gen_inputs = tf.tile(gen_inputs, [num_gen_images, 1,1,1])
 
     elif gen_inputs == "custom":
       _shape=(1, input_image_size, input_image_size, input_image_channel)
       tf.random.set_seed(1)
-      z1 = tf.random.normal(shape=_shape, dtype=tf.float32)
+      z1 = tf.random.normal(shape=_shape, dtype=get_compute_dtype())
       tf.random.set_seed(2)
-      z2 = tf.random.normal(shape=_shape, dtype=tf.float32)
+      z2 = tf.random.normal(shape=_shape, dtype=get_compute_dtype())
       theta = np.linspace(0, 1, 11)
       v = np.cos(theta*np.pi/2)
       z = (v[:,None,None,None])*z1 + np.sqrt((1-v[:,None,None,None]**2))*z2
@@ -473,7 +477,7 @@ def main():
       zlist = []
       for seed in range(10):
         tf.random.set_seed(seed)
-        zlist.append(tf.random.normal(shape=_shape, dtype=tf.float32))
+        zlist.append(tf.random.normal(shape=_shape, dtype=get_compute_dtype()))
       gen_inputs = tf.concat(zlist, axis=0)
     
     elif gen_inputs=="_freeze_ini":
@@ -481,7 +485,7 @@ def main():
       images = 2*images -1.0
       images = images[0:10]
       n, h, w, c = images.shape
-      noises = tf.random.normal(shape=images.shape, dtype=tf.float32)
+      noises = tf.random.normal(shape=images.shape, dtype=get_compute_dtype())
       noises = noises.numpy()
       noises[:, 0:h//2, 0:h//2, :] = images[:, 0:h//2, 0:w//2, :]
       gen_inputs = noises
