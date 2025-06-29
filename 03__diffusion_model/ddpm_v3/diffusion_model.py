@@ -136,6 +136,37 @@ class DiffusionModel(keras.Model):
         )
         return self.diff_util.p_sample(pred_mean, pred_sigma)
 
+    def sample_images(
+        self,
+        num_images=20,
+        clip_denoise=True,
+        gen_inputs=None,
+    ):
+        """Generate ``num_images`` samples and return them as numpy arrays.
+
+        This is a lightweight variant of :meth:`generate_images` used for
+        inline evaluation where we only need the final samples rather than
+        saving them to disk.
+        """
+        img_input, _ = self.network.inputs
+        _, img_size, _, img_channel = img_input.shape
+        if gen_inputs is None:
+            _shape = (num_images, img_size, img_size, img_channel)
+            samples = tf.random.normal(shape=_shape, dtype=tf.float32)
+        else:
+            samples = gen_inputs
+        reverse_timeindex = np.arange(
+            self.timesteps, 0, -self.diff_util.reverse_stride, dtype=np.int32
+        )
+        for t in reverse_timeindex:
+            samples = self._denoise_step(
+                samples, tf.constant(t, dtype=tf.int32), clip_denoise
+            )
+        output_images = samples.numpy()
+        output_images = np.clip(output_images, -1, 1)
+        output_images = 0.5 * (output_images + 1)
+        return output_images
+
     def generate_images(
         self,
         epoch=None,

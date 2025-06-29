@@ -7,6 +7,7 @@ import time
 import yaml
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras.applications.inception_v3 import InceptionV3, preprocess_input
 
 tf.get_logger().setLevel("ERROR")
 from tensorflow import keras
@@ -68,6 +69,78 @@ class TQDMProgressBar(keras.callbacks.Callback):
 
   def on_epoch_end(self, epoch, logs=None):
     self.pbar.close()
+
+
+class InlineEvalCallback(keras.callbacks.Callback):
+  """Generate images during training and evaluate with FID.
+
+  This callback generates a small batch of images every ``eval_interval``
+  training steps. The Fr\'echet Inception Distance (FID) between the generated
+  samples and a batch of validation images is computed to monitor progress.
+  The model with the lowest FID will be saved to ``savedir`` and training will
+  stop if no improvement is seen for ``patience`` evaluations.
+  """
+
+  def __init__(self, valid_ds, eval_interval=1000, savedir=None,
+               patience=3, num_images=16):
+    super().__init__()
+    self.valid_ds = valid_ds
+    self.eval_interval = eval_interval
+    self.savedir = savedir
+    self.patience = patience
+    self.num_images = num_images
+    self.best = np.inf
+    self.wait = 0
+    self.valid_iter = iter(valid_ds)
+    self.inception = InceptionV3(include_top=False, pooling='avg',
+                                 input_shape=(299, 299, 3))
+
+  def _calc_fid(self, real, fake):
+    real = tf.image.resize(real, (299, 299))
+    fake = tf.image.resize(fake, (299, 299))
+    real = preprocess_input(real * 255.0)
+    fake = preprocess_input(fake * 255.0)
+    act1 = self.inception(real, training=False)
+    act2 = self.inception(fake, training=False)
+    mu1 = tf.reduce_mean(act1, axis=0)
+    mu2 = tf.reduce_mean(act2, axis=0)
+    x1 = act1 - mu1
+    x2 = act2 - mu2
+    sigma1 = tf.matmul(x1, x1, transpose_a=True) / tf.cast(tf.shape(act1)[0]-1, tf.float32)
+    sigma2 = tf.matmul(x2, x2, transpose_a=True) / tf.cast(tf.shape(act2)[0]-1, tf.float32)
+    diff = mu1 - mu2
+    covmean = tf.linalg.sqrtm(tf.matmul(sigma1, sigma2))
+    covmean = tf.math.real(covmean)
+    fid = tf.tensordot(diff, diff, axes=1) + tf.linalg.trace(
+        sigma1 + sigma2 - 2.0 * covmean)
+    return float(fid.numpy())
+
+  def on_train_batch_end(self, batch, logs=None):
+    step = int(self.model.optimizer.iterations.numpy())
+    if step == 0 or step % self.eval_interval != 0:
+      return
+    try:
+      real_images = next(self.valid_iter)
+    except StopIteration:
+      self.valid_iter = iter(self.valid_ds)
+      real_images = next(self.valid_iter)
+    real_images = (real_images + 1.0) / 2.0
+    fake_images = self.model.sample_images(num_images=self.num_images)
+    fid_value = self._calc_fid(real_images[:self.num_images],
+                               fake_images[:self.num_images])
+    logging.info(f"[EVAL] step {step}, FID={fid_value:.6f}")
+    if fid_value < self.best:
+      self.best = fid_value
+      self.wait = 0
+      if self.savedir is not None:
+        best_path = os.path.join(self.savedir, "best_model.h5")
+        self.model.ema_network.save(best_path, include_optimizer=False)
+        logging.info(f"[EVAL] best model saved to {best_path}")
+    else:
+      self.wait += 1
+      if self.wait >= self.patience:
+        logging.info("[EVAL] Early stopping triggered")
+        self.model.stop_training = True
 
 
 def init_logging(filename, checkpoint=None):
@@ -350,11 +423,14 @@ def main():
     #  )
     
     callback_list = [
-      csv_logger, 
+      csv_logger,
       callback_save_ema_latest,
       TQDMProgressBar(),
       #callback_save_ema_best,
       callback_genimages,
+      InlineEvalCallback(valid_ds, eval_interval=1000, savedir=logging_dir),
+      keras.callbacks.EarlyStopping(monitor='val_loss', patience=10,
+                                    restore_best_weights=True),
       ]
 
     if loss_fn == "MAE":
