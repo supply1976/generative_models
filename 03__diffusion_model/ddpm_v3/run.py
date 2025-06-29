@@ -8,6 +8,7 @@ import yaml
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.applications.inception_v3 import InceptionV3, preprocess_input
+from scipy.linalg import sqrtm
 
 tf.get_logger().setLevel("ERROR")
 from tensorflow import keras
@@ -109,7 +110,8 @@ class InlineEvalCallback(keras.callbacks.Callback):
     sigma1 = tf.matmul(x1, x1, transpose_a=True) / tf.cast(tf.shape(act1)[0]-1, tf.float32)
     sigma2 = tf.matmul(x2, x2, transpose_a=True) / tf.cast(tf.shape(act2)[0]-1, tf.float32)
     diff = mu1 - mu2
-    covmean = tf.linalg.sqrtm(tf.matmul(sigma1, sigma2))
+    s12 = tf.matmul(sigma1, sigma2)
+    covmean = sqrtm(s12.numpy())
     covmean = tf.math.real(covmean)
     fid = tf.tensordot(diff, diff, axes=1) + tf.linalg.trace(
         sigma1 + sigma2 - 2.0 * covmean)
@@ -428,7 +430,7 @@ def main():
       TQDMProgressBar(),
       #callback_save_ema_best,
       callback_genimages,
-      InlineEvalCallback(valid_ds, eval_interval=1000, savedir=logging_dir),
+      InlineEvalCallback(valid_ds, eval_interval=10000, savedir=logging_dir),
       keras.callbacks.EarlyStopping(monitor='val_loss', patience=10,
                                     restore_best_weights=True),
       ]

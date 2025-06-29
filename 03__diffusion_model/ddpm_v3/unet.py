@@ -153,7 +153,7 @@ def build_model(
 
     x = ResidualBlock(
         widths[-1],
-        False,
+        has_attention[-1],
         num_heads=num_heads,
         groups=norm_groups,
         actf=actf,
