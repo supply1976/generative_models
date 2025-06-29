@@ -82,7 +82,7 @@ def get_epe(model, valset, target_image_ambit, tanh_norm, trainer_type="fit"):
     epes = []
     curvatureErrors = []
     slopeErrors = []
-    if trainer_type is not "fit":
+    if trainer_type != "fit":
         valset = zip(*valset)
     for img_A, real_B in valset:
         fake_B = model.predict(img_A)
@@ -97,7 +97,7 @@ def get_psnrs(model, valset, target_image_ambit, tanh_norm, epoch="epoch", train
     epes = []
     curvatureErrors = []
     slopeErrors = []
-    if trainer_type is not "fit":
+    if trainer_type != "fit":
         valset = zip(*valset)
     for img_A, real_B in valset:
         fake_B = model.predict(img_A)
@@ -118,7 +118,7 @@ def get_psnrs_adrs0(model, valset, target_image_ambit, tanh_norm, epoch="epoch",
     epes = []
     curvatureErrors = []
     slopeErrors = []
-    if trainer_type is not "fit":
+    if trainer_type != "fit":
         valset = zip(*valset)
     for img_A, real_B in valset:
         fake_B = model.predict(img_A)
@@ -145,7 +145,7 @@ def get_psnrs_adrs(model, valset, target_image_ambit, tanh_norm, trainer_type="f
     curvatureErrors = []
     slopeErrors = []
 
-    if trainer_type is not "fit":
+    if trainer_type != "fit":
         valset = zip(*valset)
     for img_A, real_B in valset:
         fake_B = model.predict(img_A)
