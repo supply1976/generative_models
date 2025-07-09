@@ -33,7 +33,8 @@ class DiffusionModel(keras.Model):
     @tf.function
     def train_step(self, images):
         batch_size = tf.shape(images)[0]
-        t = tf.random.uniform(minval=1, maxval=self.timesteps + 1, shape=(batch_size,), dtype=tf.int32)
+        t = tf.random.uniform(
+            minval=1, maxval=self.timesteps + 1, shape=(batch_size,), dtype=tf.int32)
         with tf.GradientTape() as tape:
             noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
             images_t, v_t = self.diff_util.q_sample(images, t, noises)
@@ -103,13 +104,14 @@ class DiffusionModel(keras.Model):
             savedir = './saved_models'
         os.makedirs(savedir, exist_ok=True)
         epo = str(epoch).zfill(5)
-        if epoch % 1000 == 0 and epoch > 0:
-            pass
-        name_string = "unet_tf" + tf.__version__ + "_latest"
-        path_unet_latest = os.path.join(savedir, name_string)
-        path_unet_latest_ema = os.path.join(savedir, "ema_" + name_string)
-        self.network.save(path_unet_latest + ".h5", include_optimizer=False)
-        self.ema_network.save(path_unet_latest_ema + ".h5", include_optimizer=False)
+        output_name = "unet_tf" + tf.__version__ + "ema_"
+        if epoch % 100 == 0 and epoch > 0:
+            path_unet_ema_epo = os.path.join(savedir, output_name+f"epoch_{epo}")
+            self.ema_network.save(path_unet_ema_epo + ".h5", include_optimizer=False)
+            
+        path_unet_ema_latest = os.path.join(savedir, output_name+"latest")
+        self.ema_network.save(path_unet_ema_latest + ".h5", include_optimizer=False)
+        #self.ema_network.save_weights(path_unet_ema_latest + ".weights.h5")
 
     @tf.function
     def _save_frozen_graph(self, frozen_graph_path):
@@ -123,11 +125,12 @@ class DiffusionModel(keras.Model):
         with tf.io.gfile.GFile(frozen_graph_path, "wb") as f:
             f.write(frozen_graph_def.SerializeToString())
 
-    @tf.function
+    #@tf.function
     def _denoise_step(self, samples, t, clip_denoise):
         """Run one reverse diffusion step."""
         tt = tf.fill((tf.shape(samples)[0],), t)
-        y_pred = self.ema_network([samples, tt], training=False)
+        #y_pred = self.ema_network([samples, tt], training=False)
+        y_pred = self.ema_network.predict([samples, tt], batch_size=16, verbose=0)
         pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
             samples, tt, self.diff_util.pred_type, y_pred, clip_denoise=clip_denoise
         )

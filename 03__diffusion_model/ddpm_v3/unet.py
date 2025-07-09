@@ -1,3 +1,17 @@
+"""
+unet.py
+--------
+Defines a configurable UNet model for image-to-image tasks with optional attention and time embedding support.
+
+Functions:
+    build_model(...):
+        Builds and returns a Keras UNet model with skip connections, residual blocks, and optional attention.
+
+Example usage:
+    from unet import build_model
+    model = build_model(image_size=256, image_channel=1)
+"""
+
 import tensorflow as tf
 from tensorflow import keras
 
@@ -5,8 +19,6 @@ from layers import (
     kernel_init,
     TimeEmbedding,
     TimeMLP,
-    SpaceToDepthLayer,
-    DepthToSpaceLayer,
     ResidualBlock,
     DownSample,
     UpSample,
@@ -29,47 +41,45 @@ def build_model(
     kernel_size=3,
     use_cross_attention=False,
 ):
-    """Build UNet model.
+    """
+    Build a configurable UNet model with skip connections, residual blocks, and optional attention.
 
     Parameters
     ----------
-    image_size : int, optional
-        Spatial resolution of the input and output tensors. Default ``256``.
-    image_channel : int, optional
-        Number of channels in the input image. Default ``1``.
-    widths : list[int], optional
-        Channel widths for each resolution level. Default ``[32, 64, 128, 256]``.
-    has_attention : list[bool], optional
-        Whether to apply self-attention at each level. Length must match
-        ``widths``. Default ``[False, False, False, True]``.
-    num_heads : int, optional
-        Number of attention heads when attention is enabled. Default ``1``.
-    num_res_blocks : int, optional
-        Number of residual blocks at each level. Default ``2``.
-    norm_groups : int, optional
-        Number of groups for ``GroupNormalization``. Default ``32``.
-    interpolation : str, optional
-        Upsampling interpolation method. Default ``"nearest"``.
-    actf : Callable, optional
+    image_size : int
+        Spatial resolution of the input and output tensors.
+    image_channel : int
+        Number of channels in the input image.
+    widths : list[int]
+        Channel widths for each resolution level.
+    has_attention : list[bool]
+        Whether to apply self-attention at each level. Length must match widths.
+    num_heads : int
+        Number of attention heads when attention is enabled.
+    num_res_blocks : int
+        Number of residual blocks at each level.
+    norm_groups : int
+        Number of groups for GroupNormalization.
+    interpolation : str
+        Upsampling interpolation method.
+    actf : Callable
         Activation function used throughout the network.
-        Default ``keras.activations.swish``.
-    block_size : int, optional
-        Space-to-depth scaling factor. Default ``2``.
-    temb_dim : int, optional
-        Dimension of the time embedding. Default ``128``.
-    dropout_rate : float, optional
-        Dropout rate applied inside residual blocks. ``0.0`` disables dropout.
-    kernel_size : int or tuple[int, int], optional
-        Convolution kernel size used for all convolutions. Default ``3``.
-    use_cross_attention : bool, optional
-        If ``True``, attention blocks use cross-attention with the time
-        embeddings. Default ``False``.
+    block_size : int
+        Space-to-depth scaling factor.
+    temb_dim : int
+        Dimension of the time embedding.
+    dropout_rate : float
+        Dropout rate applied inside residual blocks.
+    kernel_size : int or tuple[int, int]
+        Convolution kernel size used for all convolutions.
+    use_cross_attention : bool
+        If True, attention blocks use cross-attention with the time embeddings.
 
     Returns
     -------
     keras.Model
-        Model that maps ``[image, timestep]`` inputs to an image tensor of
-        shape ``(batch, image_size, image_size, image_channel)``.
+        Model that maps [image, timestep] inputs to an image tensor of
+        shape (batch, image_size, image_size, image_channel).
     """
     if not isinstance(image_size, int) or image_size <= 0:
         raise ValueError("`image_size` must be a positive integer.")
@@ -80,7 +90,7 @@ def build_model(
     if not all(isinstance(w, int) and w > 0 for w in widths):
         raise ValueError("All elements in `widths` must be positive integers.")
     if not isinstance(has_attention, list) or len(has_attention) != len(widths):
-        raise ValueError("`has_attention` must be a list of booleans with the same length as `widths`." )
+        raise ValueError("`has_attention` must be a list of booleans with the same length as `widths`.")
     if not all(isinstance(h, bool) for h in has_attention):
         raise ValueError("All elements in `has_attention` must be booleans.")
     if not isinstance(num_heads, int) or num_heads <= 0:
@@ -116,12 +126,14 @@ def build_model(
     image_input = keras.Input(shape=input_shape, name="image_input")
     time_input = keras.Input(shape=(), dtype=tf.int32, name="time_input")
 
+    # Space-to-depth if block_size > 1
     if block_size > 1:
         assert image_size % block_size == 0
-        x = SpaceToDepthLayer(block_size)(image_input)
+        x = tf.nn.space_to_depth(image_input, block_size)
     else:
         x = image_input
 
+    # Initial convolution
     x = keras.layers.Conv2D(
         filters=widths[0],
         kernel_size=kernel_size,
@@ -129,11 +141,13 @@ def build_model(
         kernel_initializer=kernel_init(1.0),
     )(x)
 
+    # Time embedding
     temb = TimeEmbedding(dim=temb_dim, name="TimeEmb")(time_input)
     temb = TimeMLP(units=temb_dim, actf=actf)(temb)
 
     skips = [x]
 
+    # Downsampling path
     for i in range(len(widths)):
         for _ in range(num_res_blocks):
             x = ResidualBlock(
@@ -151,9 +165,10 @@ def build_model(
             x = DownSample(widths[i])(x)
             skips.append(x)
 
+    # Bottleneck
     x = ResidualBlock(
         widths[-1],
-        has_attention[-1],
+        True,
         num_heads=num_heads,
         groups=norm_groups,
         actf=actf,
@@ -172,6 +187,7 @@ def build_model(
         use_cross_attention=use_cross_attention,
     )([x, temb])
 
+    # Upsampling path
     for i in reversed(range(len(widths))):
         for _ in range(num_res_blocks + 1):
             x = keras.layers.Concatenate(axis=-1)([x, skips.pop()])
@@ -188,6 +204,7 @@ def build_model(
         if i != 0:
             x = UpSample(widths[i], interpolation=interpolation)(x)
 
+    # Final normalization and convolution
     x = keras.layers.GroupNormalization(groups=norm_groups)(x)
     x = keras.layers.Activation(actf)(x)
     x = keras.layers.Conv2D(
@@ -198,7 +215,9 @@ def build_model(
         name="final_conv2d",
     )(x)
 
+    # Depth-to-space if block_size > 1
     if block_size > 1:
-        x = DepthToSpaceLayer(block_size)(x)
+        x = tf.nn.depth_to_space(x, block_size)
+
     return keras.Model([image_input, time_input], x, name="unet")
 
