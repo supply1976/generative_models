@@ -7,11 +7,12 @@ from tensorflow import keras
 
 
 class DataLoader:
-  def __init__(self, 
+  def __init__(self,
     data_dir,
     img_size,
-    crop_size=None, 
-    npz_key='image', 
+    crop_size=None,
+    npz_key='image',
+    label_key=None,
     file_format='.npz',
     ):
     """
@@ -28,6 +29,7 @@ class DataLoader:
     self.crop_size = crop_size
     self.npz_key = npz_key
     self.data_dir = os.path.abspath(data_dir)
+    self.label_key = label_key
     assert os.path.exists(self.data_dir), f"data_dir {self.data_dir} not exists"
     assert os.path.isdir(self.data_dir), f"data_dir {self.data_dir} is not a directory"
     assert self.npz_key is not None, "npz_key should not be None"
@@ -57,7 +59,6 @@ class DataLoader:
   def _load_npz(self, path):
 
     def _preprocess(x):
-      #raw_name = x.numpy().decode()
       raw_name = x.decode('utf-8')
       data = np.load(raw_name)
       assert self.npz_key in list(data.keys())
@@ -65,6 +66,9 @@ class DataLoader:
       if len(arr.shape) == 2:
         arr = np.expand_dims(arr, axis=-1)
       self.h, self.w, self.c = arr.shape
+      label = None
+      if self.label_key is not None and self.label_key in data:
+        label = data[self.label_key].astype(np.int32)
 
       if self.crop_size is not None:
         h, w, _ = arr.shape
@@ -75,12 +79,18 @@ class DataLoader:
         arr = arr[llx:urx, lly:ury, :]
         
       arr = (arr) *(self.CLIP_MAX-self.CLIP_MIN) + self.CLIP_MIN
-      return arr
-    img = tf.numpy_function(_preprocess, [path], tf.float32)
+      return arr, label
+
+    output_types = (tf.float32, tf.int32) if self.label_key is not None else tf.float32
+    img, label = tf.numpy_function(_preprocess, [path], output_types) if self.label_key is not None else (tf.numpy_function(_preprocess, [path], tf.float32), None)
     img_size = self.img_size if self.crop_size is None else self.crop_size
     img = tf.ensure_shape(img, [img_size, img_size, None])
-    
-    return img
+
+    if self.label_key is not None:
+      label = tf.ensure_shape(label, [])
+      return img, label
+    else:
+      return img
     
   def _get_dataset(self):
     # train ds
