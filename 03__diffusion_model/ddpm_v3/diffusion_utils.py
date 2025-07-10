@@ -113,10 +113,12 @@ class DiffusionUtility:
             pred_noise = (x_t - mu_t * x_0) / sigma_t
         _mean = rev_mu_ddim_x0 * x_0 + rev_mu_ddim_noise * pred_noise
         _sigma = self.ddim_eta * tf.gather(self.reverse_sigma_coefs, t)[:, None, None, None]
+        _sigma = tf.cast(_sigma, _mean.dtype)
         return (_mean, _sigma)
 
     def p_sample(self, pred_mean, pred_sigma):
-        noise = tf.random.normal(shape=pred_mean.shape, dtype=tf.float32)
+        noise = tf.random.normal(shape=pred_mean.shape, dtype=pred_mean.dtype)
+        pred_sigma = tf.cast(pred_sigma, pred_mean.dtype)
         x_s = pred_mean + pred_sigma * noise
         return x_s
 
