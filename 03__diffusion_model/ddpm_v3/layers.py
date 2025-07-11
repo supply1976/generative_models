@@ -133,7 +133,7 @@ class ResidualBlockLayer(keras.layers.Layer):
         if not (isinstance(inputs, (list, tuple)) and len(inputs) == 2):
             raise ValueError("inputs must be a tuple/list of (x, t)")
         x, t = inputs
-        if x.shape.rank != 4:
+        if len(x.shape) != 4:
             raise ValueError("x must be a 4D tensor (batch, height, width, channels)")
         residual = x if self.res_conv is None else self.res_conv(x)
         temb = self.temb_act(t)
@@ -235,7 +235,7 @@ def ResidualBlock(width, attention, num_heads, groups, actf,
         if not (isinstance(inputs, (list, tuple)) and len(inputs) == 2):
             raise ValueError("inputs must be a tuple/list of (x, t)")
         x, t = inputs
-        if x.shape.rank != 4:
+        if len(x.shape) != 4:
             raise ValueError("x must be a 4D tensor (batch, height, width, channels)")
         input_width = x.shape[3]
         if input_width == width:
@@ -283,7 +283,7 @@ def DownSample(width):
         function: A function that downsamples a 4D tensor.
     """
     def apply(x):
-        if x.shape.rank != 4:
+        if len(x.shape) != 4:
             raise ValueError("Input to DownSample must be a 4D tensor (batch, height, width, channels)")
         x = keras.layers.Conv2D(width, kernel_size=3, strides=2, padding="same", kernel_initializer=kernel_init(1.0))(x)
         return x
@@ -300,7 +300,7 @@ def UpSample(width, interpolation="nearest"):
         function: A function that upsamples a 4D tensor.
     """
     def apply(x):
-        if x.shape.rank != 4:
+        if len(x.shape) != 4:
             raise ValueError("Input to UpSample must be a 4D tensor (batch, height, width, channels)")
         x = keras.layers.UpSampling2D(size=2, interpolation=interpolation)(x)
         x = keras.layers.Conv2D(width, kernel_size=3, padding="same", kernel_initializer=kernel_init(1.0))(x)
