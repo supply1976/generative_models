@@ -1,6 +1,7 @@
 DATASET:
   NAME: simple01
-  PATH: ../simple_npz_datasets/eng_letters_26x64x64x1.npz
+  PATH: ../datasets/simple01_eng_letters/data/
+  LABEL_KEY: label
   PREPROCESSING:
     CROP_SIZE:
     CLIP_MIN: -1.0
@@ -16,10 +17,10 @@ TRAINING:
   HYPER_PARAMETERS:
     EPOCHS: 500
     LR_TYPE: constant
-    STEPS_PER_EPOCH: 60
+    STEPS_PER_EPOCH: 50
     BATCH_SIZE: 4
     LEARNING_RATE: 0.0001
-    WARMUP_STEPS: 500
+    WARMUP_STEPS:
   NETWORK:
     BLOCK_SIZE: 1
     SCHEDULER: linear
@@ -29,11 +30,12 @@ TRAINING:
     TIME_EMB_DIM: 64
     FIRST_CHANNEL: 16
     CHANNEL_MULTIPLIER: [1, 2, 4, 8]
-    HAS_ATTENTION: [False, False, False, False]
+    HAS_ATTENTION: [False, False, False, True]
     NUM_HEADS: 1
-    DROPOUT_RATE: 0.1
+    DROPOUT_RATE: 0
     KERNEL_SIZE: 3
     USE_CROSS_ATTENTION: false
+    NUM_CLASSES: 26
   OUTPUT_DIR: "./training_outputs"
 
 IMAGE_GENERATION:
@@ -44,4 +46,5 @@ IMAGE_GENERATION:
   DDIM_ETA: 1.0
   RANDOM_SEED:
   GEN_INPUTS:
+  CLASS_LABEL:
   GEN_OUTPUT_DIR: gen_temp
