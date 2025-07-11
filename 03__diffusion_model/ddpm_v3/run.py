@@ -140,11 +140,19 @@ class InlineEvalCallback(keras.callbacks.Callback):
             return
         try:
             real_images = next(self.valid_iter)
+            if isinstance(real_images, (list, tuple)):
+                real_images, labels_batch = real_images
+            else:
+                labels_batch = None
         except StopIteration:
             self.valid_iter = iter(self.valid_ds)
             real_images = next(self.valid_iter)
+            if isinstance(real_images, (list, tuple)):
+                real_images, labels_batch = real_images
+            else:
+                labels_batch = None
         real_images = (real_images + 1.0) / 2.0
-        fake_images = self.model.sample_images(num_images=self.num_images)
+        fake_images = self.model.sample_images(num_images=self.num_images, labels=labels_batch)
         fid_value = self._calc_fid(real_images[:self.num_images], fake_images[:self.num_images])
         logging.info(f"[EVAL] step {step}, FID={fid_value:.6f}")
         if fid_value < self.best:
@@ -185,7 +193,8 @@ def parse_config(config_path):
 
 def build_models(image_size, image_channel, widths, has_attention,
                  num_heads, num_res_blocks, norm_groups, block_size, temb_dim,
-                 dropout_rate=0.0, kernel_size=3, use_cross_attention=False):
+                 dropout_rate=0.0, kernel_size=3, use_cross_attention=False,
+                 num_classes=None, class_emb_dim=None):
     """
     Builds the main and EMA models.
     """
@@ -203,39 +212,53 @@ def build_models(image_size, image_channel, widths, has_attention,
         dropout_rate=dropout_rate,
         kernel_size=kernel_size,
         use_cross_attention=use_cross_attention,
+        num_classes=num_classes,
+        class_emb_dim=class_emb_dim,
     )
     network = build_model(**kwargs)
     ema_network = build_model(**kwargs)
     ema_network.set_weights(network.get_weights())
     return network, ema_network
 
-def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None, dtype=tf.float32):
+def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None,
+                     label_key=None, dtype=tf.float32):
     """
     Prepare training and validation datasets with efficient prefetching.
     """
+    autotune = tf.data.AUTOTUNE
     if os.path.isdir(dataset_path):
         dataloader = DataLoader(
             data_dir=dataset_path,
             img_size=img_size,
             crop_size=crop_size,
+            label_key=label_key,
         )
         train_ds, valid_ds = dataloader._get_dataset()
     else:
-        all_images = np.load(dataset_path)['images']
-        all_images = 2 * all_images - 1.0
+        data = np.load(dataset_path)
+        all_images = 2 * data['images'] - 1.0
+        labels = data[label_key] if (label_key is not None and label_key in data) else None
         idx = np.arange(len(all_images))
         np.random.shuffle(idx)
         num_val = int(0.1 * len(all_images))
-        train_ds = tf.data.Dataset.from_tensor_slices(all_images)
-        train_ds = train_ds.cache().shuffle(buffer_size=10000).repeat()
-        valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val]).cache()
+        if labels is None:
+            train_ds = tf.data.Dataset.from_tensor_slices(all_images)
+            valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val])
+            train_ds = train_ds.map(lambda x: tf.cast(x, dtype), num_parallel_calls=autotune)
+            valid_ds = valid_ds.map(lambda x: tf.cast(x, dtype), num_parallel_calls=autotune)
+            train_ds = train_ds.cache().shuffle(buffer_size=10000).repeat()
+            valid_ds = valid_ds.cache()
+        else:
+            train_ds = tf.data.Dataset.from_tensor_slices((all_images, labels))
+            valid_ds = tf.data.Dataset.from_tensor_slices((all_images[0:num_val], labels[0:num_val]))
+            train_ds = train_ds.map(lambda x,y: (tf.cast(x, dtype), tf.cast(y, tf.int32)), num_parallel_calls=autotune)
+            valid_ds = valid_ds.map(lambda x,y: (tf.cast(x, dtype), tf.cast(y, tf.int32)), num_parallel_calls=autotune)
+            train_ds = train_ds.cache().shuffle(buffer_size=10000).repeat()
+            valid_ds = valid_ds.cache()
 
-    autotune = tf.data.AUTOTUNE
     train_ds = train_ds.batch(batch_size, drop_remainder=True)
-    train_ds = train_ds.map(lambda x: tf.cast(x, dtype), num_parallel_calls=autotune)
-    train_ds = train_ds.prefetch(autotune)
     valid_ds = valid_ds.batch(batch_size)
-    valid_ds = valid_ds.map(lambda x: tf.cast(x, dtype), num_parallel_calls=autotune)
+    train_ds = train_ds.prefetch(autotune)
     valid_ds = valid_ds.prefetch(autotune)
     return train_ds, valid_ds
 
@@ -250,6 +273,7 @@ def train_model(FLAGS, dataset_dict, training_dict):
     # dataset
     dataset_name   = dataset_dict['NAME']
     dataset_path   = dataset_dict['PATH']
+    label_key      = dataset_dict.get('LABEL_KEY')
     crop_size = dataset_dict['PREPROCESSING']['CROP_SIZE']
     CLIP_MIN  = dataset_dict['PREPROCESSING']['CLIP_MIN']
     CLIP_MAX  = dataset_dict['PREPROCESSING']['CLIP_MAX']
@@ -280,6 +304,8 @@ def train_model(FLAGS, dataset_dict, training_dict):
     dropout_rate       = training_dict['NETWORK'].get('DROPOUT_RATE', 0.0)
     kernel_size        = training_dict['NETWORK'].get('KERNEL_SIZE', 3)
     use_cross_attention = training_dict['NETWORK'].get('USE_CROSS_ATTENTION', False)
+    num_classes       = training_dict['NETWORK'].get('NUM_CLASSES')
+    class_emb_dim     = training_dict['NETWORK'].get('CLASS_EMB_DIM')
 
     # hyper-parameters
     epochs          = training_dict['HYPER_PARAMETERS']['EPOCHS']
@@ -308,6 +334,8 @@ def train_model(FLAGS, dataset_dict, training_dict):
         dropout_rate=dropout_rate,
         kernel_size=kernel_size,
         use_cross_attention=use_cross_attention,
+        num_classes=num_classes,
+        class_emb_dim=class_emb_dim,
     )
 
     network.summary()
@@ -321,10 +349,11 @@ def train_model(FLAGS, dataset_dict, training_dict):
 
     # Get the diffusion model (keras.Model)
     ddpm = DiffusionModel(
-        network=network, 
+        network=network,
         ema_network=ema_network,
         diff_util=diff_util_train,
         timesteps=timesteps,
+        num_classes=num_classes,
         )
         
     assert dataset_name is not None
@@ -384,10 +413,11 @@ def train_model(FLAGS, dataset_dict, training_dict):
         img_size=input_image_size,
         batch_size=batch_size,
         crop_size=crop_size,
+        label_key=label_key,
         )
           
     # get input image shape
-    for x in train_ds.take(1):
+    for (x, _) in train_ds.take(1):
         _, h, w, c = x.shape
         logging.info("dataset one batch info: {}".format(x.shape))
         logging.info("signal rescale to: ({},{})".format(x.numpy().min(), x.numpy().max()))
@@ -491,6 +521,7 @@ def generate_images(FLAGS, training_dict, imgen_dict):
     gen_output_dir   = imgen_dict['GEN_OUTPUT_DIR']
     ddim_eta         = imgen_dict['DDIM_ETA']
     random_seed      = imgen_dict['RANDOM_SEED']
+    class_label      = imgen_dict.get('CLASS_LABEL')
     _freeze_ini      = imgen_dict.get('_FREEZE_INI', False)
     timesteps        = training_dict['NETWORK']['TIMESTEPS']
     scheduler        = training_dict['NETWORK']['SCHEDULER']
@@ -519,6 +550,7 @@ def generate_images(FLAGS, training_dict, imgen_dict):
         ema_network=ema_model,
         diff_util=diff_util_infer,
         timesteps=timesteps,
+        num_classes=training_dict['NETWORK'].get('NUM_CLASSES'),
         )
     
     if gen_output_dir is None: 
@@ -582,12 +614,17 @@ def generate_images(FLAGS, training_dict, imgen_dict):
 
     clip_denoise = True if FLAGS.clip_denoise else False
 
+    labels = None
+    if class_label is not None:
+        labels = tf.fill([num_gen_images], int(class_label))
+
     t0 = time.time()
 
     ddpm.generate_images(
-        num_images=num_gen_images, 
+        num_images=num_gen_images,
         savedir=gen_dir,
         gen_inputs=gen_inputs,
+        labels=labels,
         _freeze_ini=_freeze_ini,
         clip_denoise=clip_denoise,
         export_interm=export_interm)
