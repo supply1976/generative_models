@@ -40,8 +40,6 @@ def build_model(
     dropout_rate=0.0,
     kernel_size=3,
     use_cross_attention=False,
-    num_classes=None,
-    class_emb_dim=None,
 ):
     """
     Build a configurable UNet model with skip connections, residual blocks, and optional attention.
@@ -76,12 +74,6 @@ def build_model(
         Convolution kernel size used for all convolutions.
     use_cross_attention : bool
         If True, attention blocks use cross-attention with the time embeddings.
-    num_classes : int or None
-        Number of classes for class conditioning. If provided, a label input is
-        added and combined with the time embedding.
-    class_emb_dim : int or None
-        Dimension of the class embedding. Defaults to ``temb_dim`` when
-        ``num_classes`` is specified.
 
     Returns
     -------
@@ -152,20 +144,6 @@ def build_model(
     # Time embedding
     temb = TimeEmbedding(dim=temb_dim, name="TimeEmb")(time_input)
     temb = TimeMLP(units=temb_dim, actf=actf)(temb)
-
-    inputs = [image_input, time_input]
-    if num_classes is not None:
-        if class_emb_dim is None:
-            class_emb_dim_ = temb_dim
-        else:
-            class_emb_dim_ = class_emb_dim
-        class_input = keras.Input(shape=(), dtype=tf.int32, name="class_input")
-        cemb = keras.layers.Embedding(num_classes, class_emb_dim_)(class_input)
-        cemb = TimeMLP(units=temb_dim, actf=actf)(cemb)
-        temb = keras.layers.Add()([temb, cemb])
-        inputs.append(class_input)
-    else:
-        class_input = None
 
     skips = [x]
 
@@ -241,5 +219,5 @@ def build_model(
     if block_size > 1:
         x = tf.nn.depth_to_space(x, block_size)
 
-    return keras.Model(inputs, x, name="unet")
+    return keras.Model([image_input, time_input], x, name="unet")
 

@@ -7,15 +7,13 @@ import tqdm
 
 
 class DiffusionModel(keras.Model):
-    def __init__(self, network, ema_network, timesteps, diff_util, ema=0.999,
-                 num_classes=None):
+    def __init__(self, network, ema_network, timesteps, diff_util, ema=0.999):
         super().__init__()
         self.network = network
         self.ema_network = ema_network
         self.timesteps = timesteps
         self.diff_util = diff_util
         self.ema = ema
-        self.num_classes = num_classes
         self.loss_tracker = keras.metrics.Mean(name='loss')
         self.noise_loss_tracker = keras.metrics.Mean(name="n_loss")
         self.image_loss_tracker = keras.metrics.Mean(name="i_loss")
@@ -33,21 +31,14 @@ class DiffusionModel(keras.Model):
         ]
 
     @tf.function
-    def train_step(self, data):
-        if isinstance(data, (list, tuple)):
-            images, labels = data
-        else:
-            images, labels = data, None
+    def train_step(self, images):
         batch_size = tf.shape(images)[0]
         t = tf.random.uniform(
             minval=1, maxval=self.timesteps + 1, shape=(batch_size,), dtype=tf.int32)
         with tf.GradientTape() as tape:
             noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
             images_t, v_t = self.diff_util.q_sample(images, t, noises)
-            inputs = [images_t, t]
-            if labels is not None:
-                inputs.append(labels)
-            y_pred = self.network(inputs, training=True)
+            y_pred = self.network([images_t, t], training=True)
             pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
                 images_t, t, self.diff_util.pred_type, y_pred
             )
@@ -82,19 +73,12 @@ class DiffusionModel(keras.Model):
             ema_weight.assign(ema_weight * self.ema + (1 - self.ema) * weight)
 
     @tf.function
-    def test_step(self, data):
-        if isinstance(data, (list, tuple)):
-            images, labels = data
-        else:
-            images, labels = data, None
+    def test_step(self, images):
         batch_size = tf.shape(images)[0]
         t = tf.random.uniform(minval=1, maxval=self.timesteps + 1, shape=(batch_size,), dtype=tf.int32)
         noises = tf.random.normal(shape=tf.shape(images), dtype=images.dtype)
         images_t, v_t = self.diff_util.q_sample(images, t, noises)
-        inputs = [images_t, t]
-        if labels is not None:
-            inputs.append(labels)
-        y_pred = self.ema_network(inputs, training=False)
+        y_pred = self.ema_network([images_t, t], training=False)
         pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
             images_t, t, self.diff_util.pred_type, y_pred
         )
@@ -142,13 +126,11 @@ class DiffusionModel(keras.Model):
             f.write(frozen_graph_def.SerializeToString())
 
     #@tf.function
-    def _denoise_step(self, samples, t, clip_denoise, labels=None):
+    def _denoise_step(self, samples, t, clip_denoise):
         """Run one reverse diffusion step."""
         tt = tf.fill((tf.shape(samples)[0],), t)
-        inputs = [samples, tt]
-        if labels is not None:
-            inputs.append(labels)
-        y_pred = self.ema_network.predict(inputs, batch_size=16, verbose=0)
+        #y_pred = self.ema_network([samples, tt], training=False)
+        y_pred = self.ema_network.predict([samples, tt], batch_size=16, verbose=0)
         pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
             samples, tt, self.diff_util.pred_type, y_pred, clip_denoise=clip_denoise
         )
@@ -162,7 +144,6 @@ class DiffusionModel(keras.Model):
         num_images=20,
         clip_denoise=True,
         gen_inputs=None,
-        labels=None,
     ):
         """Generate ``num_images`` samples and return them as numpy arrays.
 
@@ -170,21 +151,19 @@ class DiffusionModel(keras.Model):
         inline evaluation where we only need the final samples rather than
         saving them to disk.
         """
-        img_input = self.network.inputs[0]
+        img_input, _ = self.network.inputs
         _, img_size, _, img_channel = img_input.shape
         if gen_inputs is None:
             _shape = (num_images, img_size, img_size, img_channel)
             samples = tf.random.normal(shape=_shape, dtype=tf.float32)
         else:
             samples = gen_inputs
-        if labels is None and self.num_classes is not None:
-            labels = tf.random.uniform((num_images,), maxval=self.num_classes, dtype=tf.int32)
         reverse_timeindex = np.arange(
             self.timesteps, 0, -self.diff_util.reverse_stride, dtype=np.int32
         )
         for t in reverse_timeindex:
             samples = self._denoise_step(
-                samples, tf.constant(t, dtype=tf.int32), clip_denoise, labels
+                samples, tf.constant(t, dtype=tf.int32), clip_denoise
             )
         output_images = samples.numpy()
         output_images = np.clip(output_images, -1, 1)
@@ -199,11 +178,10 @@ class DiffusionModel(keras.Model):
         num_images=20,
         clip_denoise=True,
         gen_inputs=None,
-        labels=None,
         _freeze_ini=False,
         export_interm=False,
     ):
-        img_input = self.network.inputs[0]
+        img_input, _ = self.network.inputs
         print("image input shape = {}".format(img_input.shape))
         _, img_size, _, img_channel = img_input.shape
         if gen_inputs is None:
@@ -211,8 +189,6 @@ class DiffusionModel(keras.Model):
             samples = tf.random.normal(shape=_shape, dtype=tf.float32)
         else:
             samples = gen_inputs
-        if labels is None and self.num_classes is not None:
-            labels = tf.random.uniform((num_images,), maxval=self.num_classes, dtype=tf.int32)
         n_imgs, _h, _w, _ = samples.shape
         print("generating {} images ...".format(n_imgs))
         if _freeze_ini:
@@ -224,7 +200,7 @@ class DiffusionModel(keras.Model):
             self.timesteps, 0, -self.diff_util.reverse_stride, dtype=np.int32
         )
         for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
-            samples = self._denoise_step(samples, tf.constant(t, dtype=tf.int32), clip_denoise, labels)
+            samples = self._denoise_step(samples, tf.constant(t, dtype=tf.int32), clip_denoise)
             if _freeze_ini:
                 samples = samples.numpy()
                 samples[:, 0:_h//2, 0:_w//2, :] = ini_samples[:, 0:_h//2, 0:_w//2, :]

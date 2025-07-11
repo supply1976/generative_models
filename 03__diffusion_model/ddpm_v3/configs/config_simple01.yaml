@@ -1,7 +1,6 @@
 DATASET:
   NAME: simple01
   PATH: ../simple_npz_datasets/eng_letters_26x64x64x1.npz
-  LABEL_KEY: labels
   PREPROCESSING:
     CROP_SIZE:
     CLIP_MIN: -1.0
@@ -35,7 +34,6 @@ TRAINING:
     DROPOUT_RATE: 0.1
     KERNEL_SIZE: 3
     USE_CROSS_ATTENTION: false
-    NUM_CLASSES: 26
   OUTPUT_DIR: "./training_outputs"
 
 IMAGE_GENERATION:
@@ -46,5 +44,4 @@ IMAGE_GENERATION:
   DDIM_ETA: 1.0
   RANDOM_SEED:
   GEN_INPUTS:
-  CLASS_LABEL:
   GEN_OUTPUT_DIR: gen_temp
