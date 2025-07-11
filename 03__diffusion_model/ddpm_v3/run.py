@@ -417,7 +417,11 @@ def train_model(FLAGS, dataset_dict, training_dict):
         )
           
     # get input image shape
-    for (x, _) in train_ds.take(1):
+    for _batch_data in train_ds.take(1):
+        if isinstance(_batch_data, (list, tuple)):
+            x = _batch_data[0]
+        else:
+            x = _batch_data
         _, h, w, c = x.shape
         logging.info("dataset one batch info: {}".format(x.shape))
         logging.info("signal rescale to: ({},{})".format(x.numpy().min(), x.numpy().max()))
@@ -617,7 +621,7 @@ def generate_images(FLAGS, training_dict, imgen_dict):
     labels = None
     if class_label is not None:
         labels = tf.fill([num_gen_images], int(class_label))
-
+    
     t0 = time.time()
 
     ddpm.generate_images(

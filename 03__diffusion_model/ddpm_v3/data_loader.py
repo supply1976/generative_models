@@ -79,15 +79,21 @@ class DataLoader:
         arr = arr[llx:urx, lly:ury, :]
         
       arr = (arr) *(self.CLIP_MAX-self.CLIP_MIN) + self.CLIP_MIN
-      return arr, label
+      if self.label_key is None:
+        return arr
+      else:
+        return arr, label
 
     output_types = (tf.float32, tf.int32) if self.label_key is not None else tf.float32
-    img, label = tf.numpy_function(_preprocess, [path], output_types) if self.label_key is not None else (tf.numpy_function(_preprocess, [path], tf.float32), None)
+    if self.label_key is not None:
+      img, label = tf.numpy_function(_preprocess, [path], output_types)
+      label = tf.ensure_shape(label, [])
+    else:
+      img = tf.numpy_function(_preprocess, [path], output_types)
+
     img_size = self.img_size if self.crop_size is None else self.crop_size
     img = tf.ensure_shape(img, [img_size, img_size, None])
-
     if self.label_key is not None:
-      label = tf.ensure_shape(label, [])
       return img, label
     else:
       return img
