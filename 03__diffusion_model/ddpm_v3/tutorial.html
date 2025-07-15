@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>DDPM v3 Tutorial</title>
+<meta charset="utf-8" />
+</head>
+<body>
+<h1>Training and Image Generation</h1>
+<p>This tutorial explains how to train the DDPM v3 model and generate images.</p>
+<h2>Training</h2>
+<ol>
+<li>Create a configuration YAML based on <code>configs/config_simple01.yaml</code>.</li>
+<li>Run <code>python run.py --config my_config.yaml --training</code>.</li>
+<li>Training logs and checkpoints are written to the output directory specified in the configuration.</li>
+</ol>
+<h2>Image generation</h2>
+<ol>
+<li>Update the <code>IMAGE_GENERATION</code> section in your configuration.</li>
+<li>Run <code>python run.py --config my_config.yaml --imgen</code>.</li>
+<li>Generated images will be saved under the directory specified by <code>GEN_OUTPUT_DIR</code>.</li>
+</ol>
+</body>
+</html>
