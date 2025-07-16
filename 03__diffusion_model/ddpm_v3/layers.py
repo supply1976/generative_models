@@ -2,6 +2,23 @@ import tensorflow as tf
 from tensorflow import keras
 
 
+class LayerConfig:
+    """Configuration class for consistent layer parameters."""
+    def __init__(self, width=64, groups=8, dropout_rate=0.1, 
+                 activation="swish", attention_heads=4):
+        self.width = width
+        self.groups = groups
+        self.dropout_rate = dropout_rate
+        self.activation = getattr(keras.activations, activation)
+        self.attention_heads = attention_heads
+
+def get_activation(name):
+    """Safely get activation function by name."""
+    if isinstance(name, str):
+        return getattr(keras.activations, name)
+    return name
+
+
 def kernel_init(scale):
     """
     Returns a Keras VarianceScaling initializer with the given scale.
@@ -18,6 +35,7 @@ def kernel_init(scale):
     return keras.initializers.VarianceScaling(scale, mode="fan_avg", distribution="uniform")
 
 
+# Update TimeEmbedding with better numerical stability
 class TimeEmbedding(keras.layers.Layer):
     """
     Sinusoidal time embedding layer.
@@ -28,24 +46,28 @@ class TimeEmbedding(keras.layers.Layer):
     Output shape:
         2D tensor of shape (batch, dim)
     """
-    def __init__(self, dim, **kwargs):
+    def __init__(self, dim, max_period=10000.0, **kwargs):
         super().__init__(**kwargs)
         if not isinstance(dim, int) or dim <= 0 or dim % 2 != 0:
             raise ValueError("`dim` must be a positive even integer.")
         self.dim = dim
+        self.max_period = max_period
 
     def call(self, inputs):
         inputs = tf.cast(inputs, dtype=tf.float32)
         if len(inputs.shape) != 1:
             raise ValueError("Input tensor must be 1D (batch,). Got shape: {}".format(inputs.shape))
-        emb = tf.exp(tf.linspace(0.0, 1.0, self.dim // 2) * -tf.math.log(10000.0))
-        emb = inputs[:, None] * emb[None, :]
-        emb = tf.concat([tf.sin(emb), tf.cos(emb)], axis=-1)
-        return emb
+
+        half_dim = self.dim // 2
+        freqs = tf.exp(-tf.math.log(self.max_period) * 
+                      tf.range(start=0, limit=half_dim, dtype=tf.float32) / half_dim)
+        args = inputs[:, None] * freqs[None, :]
+        embedding = tf.concat([tf.cos(args), tf.sin(args)], axis=-1)
+        return embedding
 
     def get_config(self):
         config = super().get_config()
-        config.update({"dim": self.dim})
+        config.update({"dim": self.dim, "max_period": self.max_period})
         return config
 
     @classmethod
@@ -306,3 +328,40 @@ def UpSample(width, interpolation="nearest"):
         x = keras.layers.Conv2D(width, kernel_size=3, padding="same", kernel_initializer=kernel_init(1.0))(x)
         return x
     return apply
+
+
+class FeatureFusion(keras.layers.Layer):
+    """
+    Feature fusion layer for combining multiple conditional inputs.
+    Supports adaptive feature modulation (AdaIN-style) and concatenation.
+    """
+    def __init__(self, fusion_type="concat", **kwargs):
+        super().__init__(**kwargs)
+        self.fusion_type = fusion_type  # "concat", "add", "adain"
+        
+    def build(self, input_shape):
+        if self.fusion_type == "adain":
+            feature_dim = input_shape[0][-1]
+            self.scale_transform = keras.layers.Dense(feature_dim, kernel_initializer=kernel_init(1.0))
+            self.bias_transform = keras.layers.Dense(feature_dim, kernel_initializer=kernel_init(0.0))
+        super().build(input_shape)
+    
+    def call(self, inputs):
+        x, condition = inputs
+        
+        if self.fusion_type == "concat":
+            return keras.layers.Concatenate(axis=-1)([x, condition])
+        elif self.fusion_type == "add":
+            return keras.layers.Add()([x, condition])
+        elif self.fusion_type == "adain":
+            # Adaptive Instance Normalization style
+            scale = self.scale_transform(condition)
+            bias = self.bias_transform(condition)
+            scale = keras.layers.Reshape([1, 1, -1])(scale)
+            bias = keras.layers.Reshape([1, 1, -1])(bias)
+            
+            # Normalize x
+            mean, var = tf.nn.moments(x, axes=[1, 2], keepdims=True)
+            x_norm = (x - mean) / tf.sqrt(var + 1e-8)
+            
+            return x_norm * scale + bias
