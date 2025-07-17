@@ -24,6 +24,39 @@ from layers import (
     UpSample,
 )
 
+def dummy_unet2d(cond_img_input=None, cond_class_input=None):
+    """
+    Dummy function to return a simple UNet model.
+    This is a placeholder and should be replaced with the actual UNet implementation.
+    """
+    image_input = keras.Input(shape=(256, 256, 3), name="image_input")
+    time_input = keras.Input(shape=(), dtype=tf.int32, name="time_input")
+    
+    inputs = [image_input, time_input]
+    if cond_img_input is not None:
+        inputs.append(cond_img_input)
+    if cond_class_input is not None:
+        inputs.append(cond_class_input)
+    
+    # positional embedding as transformer
+    temb = TimeEmbedding(dim=128, name="TimeEmb")(time_input)
+    if cond_class_input is not None:
+        class_emb = keras.layers.Embedding(10, 128)(cond_class_input)
+        temb = keras.layers.Add()([temb, class_emb])
+    
+    x = keras.layers.Conv2D(64, (3, 3), padding="same", activation="relu")(image_input)
+    if cond_img_input is not None:
+        encode_cond_img = keras.layers.Conv2D(64, (1, 1), padding="same", activation="relu")(cond_img_input)
+        x = keras.layers.Concatenate()([x, encode_cond_img])
+    
+    x = ResidualBlock(64)([x, temb])
+    # add DownSample and UpSample layers ...
+    # ...
+    
+    model = keras.Model(inputs=inputs, outputs=x, name="dummy_unet2d")
+    return model
+    
+        
 
 def build_model(
     image_size=256,

@@ -11,6 +11,7 @@ Features:
 
 Usage:
     python run.py --config config.yaml --training
+    python run.py --config config.yaml --training --enable_xla
     python run.py --config config.yaml --imgen
 """
 
@@ -142,10 +143,11 @@ def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None,
 # Main Logic Functions
 # =====================
 
-def train_model(FLAGS, dataset_dict, training_dict):
+def train_model(config_file):
     """
     Handles the training workflow.
     """
+    dataset_dict, training_dict, imgen_dict = parse_config(config_file)
     # dataset
     dataset_name   = dataset_dict['NAME']
     dataset_path   = dataset_dict['PATH']
@@ -192,6 +194,8 @@ def train_model(FLAGS, dataset_dict, training_dict):
     steps_per_epoch = training_dict['HYPER_PARAMETERS']['STEPS_PER_EPOCH']
     total_steps = None if steps_per_epoch is None else epochs * steps_per_epoch
     
+    clip_denoise = imgen_dict.get('CLIP_DENOISE', False)
+    
     # GPU devices
     gpus = tf.config.list_physical_devices("GPU")
     if gpus: [tf.config.experimental.set_memory_growth(gpu, True) for gpu in gpus]
@@ -220,7 +224,8 @@ def train_model(FLAGS, dataset_dict, training_dict):
     # util for training
     diff_util_train = DiffusionUtility(
         b0=0.1, b1=20, timesteps=timesteps, 
-        scheduler=scheduler, pred_type=pred_type, reverse_stride=1
+        scheduler=scheduler, pred_type=pred_type, reverse_stride=1, 
+        clip_denoise=clip_denoise,
         )
 
     # Get the diffusion model (keras.Model)
@@ -228,7 +233,6 @@ def train_model(FLAGS, dataset_dict, training_dict):
         network=network,
         ema_network=ema_network,
         diff_util=diff_util_train,
-        timesteps=timesteps,
         num_classes=num_classes,
         )
         
@@ -276,7 +280,7 @@ def train_model(FLAGS, dataset_dict, training_dict):
         logging.info("[INFO] Restoring model from: {}".format(trained_h5))
         logging.info("[INFO] Continuous Transfer training ...")
         
-    shutil.copy(FLAGS.config, os.path.join(logging_dir, "training_config.yaml"))
+    shutil.copy(config_file, os.path.join(logging_dir, "training_config.yaml"))
     # end of creating logging_dir 
 
     logging.info("[INFO] Training Start Time: {}".format(datetime.datetime.now()))
@@ -303,18 +307,21 @@ def train_model(FLAGS, dataset_dict, training_dict):
         logging.info("signal rescale to: ({},{})".format(x.numpy().min(), x.numpy().max()))
     assert c==input_image_channel
     assert h==input_image_size
-        
+    
     callback_save_ema_latest = keras.callbacks.LambdaCallback(
         on_epoch_end=lambda epoch, logs: ddpm.save_model(epoch, savedir=logging_dir))
     callback_genimages = keras.callbacks.LambdaCallback(
-        on_train_end=ddpm.generate_images)
+        on_train_end=lambda logs: ddpm.generate_images_and_save(logs=None))
         
     logging.info("[INFO] Forward Training Steps: {}".format(timesteps))
-    logging.info("[INFO] Scheduler: {} ".format(scheduler))
+    logging.info("[INFO] Noise Scheduler: {} ".format(scheduler))
+    logging.info("[INFO] Learning Rate Type: {}".format(lr_type))
     logging.info("[INFO] Learning Rate: {}".format(learning_rate))
+    logging.info("[INFO] Batch Size: {}".format(batch_size))
     logging.info("[INFO] Predict Type: {}".format(pred_type))
     logging.info("[INFO] Loss Function: {}".format(loss_fn))
     logging.info("[INFO] Total Epochs: {}".format(epochs))
+    logging.info("[INFO] Steps per Epoch: {}".format(steps_per_epoch))
 
     csv_logger = CSVLogger(os.path.join(logging_dir, "log.csv"), append=True, separator=",")
     #best_ckpt_path = os.path.join(logging_dir, "dm_best.weights.h5")
@@ -376,7 +383,7 @@ def train_model(FLAGS, dataset_dict, training_dict):
     # Train the model
     ddpm.fit(
         train_ds,
-        validation_data=valid_ds,
+        #validation_data=valid_ds,
         epochs=epochs,
         steps_per_epoch=steps_per_epoch,
         callbacks=callback_list,
@@ -388,10 +395,11 @@ def train_model(FLAGS, dataset_dict, training_dict):
     
     return None
 
-def generate_images(FLAGS, training_dict, imgen_dict):
+def generate_images(config_file):
     """
     Handles the image generation workflow.
     """
+    dataset_dict, training_dict, imgen_dict = parse_config(config_file)
     # for image generation (imgen)
     imgen_model_path = imgen_dict['MODEL_PATH']
     num_gen_images   = imgen_dict['NUM_GEN_IMAGES']
@@ -402,16 +410,18 @@ def generate_images(FLAGS, training_dict, imgen_dict):
     ddim_eta         = imgen_dict['DDIM_ETA']
     random_seed      = imgen_dict['RANDOM_SEED']
     class_label      = imgen_dict.get('CLASS_LABEL')
-    _freeze_ini      = imgen_dict.get('_FREEZE_INI', False)
+    num_classes      = training_dict['NETWORK'].get('NUM_CLASSES')
     timesteps        = training_dict['NETWORK']['TIMESTEPS']
     scheduler        = training_dict['NETWORK']['SCHEDULER']
     pred_type        = training_dict['PRED_TYPE']
     
+    clip_denoise = imgen_dict.get('CLIP_DENOISE', False)
+
     # util for inference
     diff_util_infer = DiffusionUtility(
         b0=0.1, b1=20, timesteps=timesteps, 
         scheduler=scheduler, pred_type=pred_type, reverse_stride=reverse_stride,
-        ddim_eta=ddim_eta,
+        ddim_eta=ddim_eta, clip_denoise=clip_denoise,
         )
     assert imgen_model_path is not None
     assert os.path.isfile(imgen_model_path)
@@ -425,12 +435,11 @@ def generate_images(FLAGS, training_dict, imgen_dict):
         },
     )
     
-    ddpm = DiffusionModel(
+    ddpm_infer = DiffusionModel(
         network=ema_model,
         ema_network=ema_model,
         diff_util=diff_util_infer,
-        timesteps=timesteps,
-        num_classes=training_dict['NETWORK'].get('NUM_CLASSES'),
+        num_classes=num_classes,
         )
     
     if gen_output_dir is None: 
@@ -448,7 +457,7 @@ def generate_images(FLAGS, training_dict, imgen_dict):
     logging.info("[IMGEN] model predict type: {}".format(diff_util_infer.pred_type))
     logging.info("[IMGEN] DDIM eta = {}".format(diff_util_infer.ddim_eta))
     logging.info("[IMGEN] Set random seed: {}".format(random_seed))
-    logging.info("[IMGEN] clip_denoise: {}".format(FLAGS.clip_denoise))
+    logging.info("[IMGEN] clip_denoise: {}".format(clip_denoise))
     logging.info("[IMGEN] hostname: {}".format(os.uname().nodename))
     logging.info("[IMGEN] TF version: {}".format(tf.__version__))
 
@@ -492,22 +501,24 @@ def generate_images(FLAGS, training_dict, imgen_dict):
     else:
         return
 
-    clip_denoise = True if FLAGS.clip_denoise else False
-
     labels = None
     if class_label is not None:
         labels = tf.fill([num_gen_images], int(class_label))
     
     t0 = time.time()
 
-    ddpm.generate_images(
-        num_images=num_gen_images,
+    ddpm_infer.generate_images_and_save(
         savedir=gen_dir,
+        num_images=num_gen_images,
+        clip_denoise=clip_denoise,
         gen_inputs=gen_inputs,
         labels=labels,
-        _freeze_ini=_freeze_ini,
-        clip_denoise=clip_denoise,
-        export_interm=export_interm)
+        inpaint_mask=None,
+        freeze_channel=None,
+        export_intermediate=export_interm,
+        enable_memory_logging=True,
+        memory_log_path=os.path.join(gen_dir, "memory_log.txt"),
+        )
     #
     deltaT = np.around((time.time()-t0), 1)
     logging.info("Generated {} images with {} seconds".format(num_gen_images, deltaT))
@@ -524,7 +535,6 @@ def main():
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--training", dest='training', action='store_true')
     parser.add_argument("--imgen", dest='imgen', action='store_true')
-    parser.add_argument("--clip_denoise", action='store_true')
     #parser.add_argument("--mixed_precision", action='store_true', help='Enable mixed float16 training')
     parser.add_argument("--enable_xla", action='store_true', help='Enable XLA JIT compilation')
     FLAGS, _ = parser.parse_known_args()
@@ -537,12 +547,12 @@ def main():
         tf.config.optimizer.set_jit(True)
 
     #dtype = tf.float16 if FLAGS.mixed_precision else tf.float32
-    dataset_dict, training_dict, imgen_dict = parse_config(FLAGS.config)
+    #dataset_dict, training_dict, imgen_dict = parse_config(FLAGS.config)
 
     if FLAGS.training:
-        train_model(FLAGS, dataset_dict, training_dict)
+        train_model(FLAGS.config)
     elif FLAGS.imgen:
-        generate_images(FLAGS, training_dict, imgen_dict)
+        generate_images(FLAGS.config)
     else:
         print("No action specified. Use --training or --imgen.")
 
