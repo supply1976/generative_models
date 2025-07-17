@@ -95,7 +95,7 @@ class ImageGenerator:
             output_images[output_images > 0.99] = 1
         return output_images
     
-    def sample_images(self, num_images=20, clip_denoise=False, gen_inputs=None, labels=None):
+    def sample_images(self, reverse_stride=10, num_images=20, clip_denoise=False, gen_inputs=None, labels=None):
         """
         Generate samples and return them as numpy arrays.
         
@@ -103,6 +103,7 @@ class ImageGenerator:
         need the final samples rather than saving them to disk.
         
         Args:
+            reverse_stride: Step size for reverse diffusion
             num_images: Number of images to generate
             clip_denoise: Whether to clip denoising predictions
             gen_inputs: Optional initial samples (if None, uses random noise)
@@ -111,13 +112,16 @@ class ImageGenerator:
         Returns:
             np.ndarray: Generated images as numpy array
         """
-        reverse_stride = self.diff_util.reverse_stride
+        self.diff_util.reverse_stride = reverse_stride
+        alpha = self.diff_util._compute_alphas()
+        self.diff_util._compute_reverse_coefficients(alpha)
+        
         samples = self._prepare_initial_samples(num_images, gen_inputs)
         labels = self._prepare_labels(num_images, labels)
         
         reverse_timeindex = np.arange(self.timesteps, 0, -reverse_stride, dtype=np.int32)
         
-        for t in reverse_timeindex:
+        for t in tqdm.tqdm(reverse_timeindex):
             samples = self._denoise_step(
                 samples, tf.constant(t, dtype=tf.int32), clip_denoise, labels
             )
@@ -127,6 +131,7 @@ class ImageGenerator:
     
     def generate_images_and_save(self,
                                  logs=None,
+                                 reverse_stride=10,
                                  savedir='./',
                                  num_images=20,
                                  clip_denoise=False, 
@@ -188,10 +193,14 @@ class ImageGenerator:
         # Setup memory logging if enabled
         if enable_memory_logging and memory_log_path is None:
             memory_log_path = "./mem.log"
-            
+        
+        self.diff_util.reverse_stride = reverse_stride
+        alpha = self.diff_util._compute_alphas()
+        self.diff_util._compute_reverse_coefficients(alpha)
+        
         # Generation loop
         reverse_timeindex = np.arange(
-            self.timesteps, 0, -self.diff_util.reverse_stride, dtype=np.int32
+            self.timesteps, 0, -reverse_stride, dtype=np.int32
         )
         
         for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):

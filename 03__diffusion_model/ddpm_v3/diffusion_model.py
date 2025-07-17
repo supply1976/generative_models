@@ -142,30 +142,3 @@ class DiffusionModel(keras.Model):
         output_dict = self.image_generator.generate_images_and_save(**kwargs)
         
         return output_dict
-
-
-class InlineImageGenerationCallback(keras.callbacks.Callback):
-    """Keras callback to generate and save images at the end of every N epochs."""
-    
-    def __init__(self, diffusion_model, period=1, savedir='./inline_gen', num_images=1, **gen_kwargs):
-        super().__init__()
-        self.diffusion_model = diffusion_model
-        self.period = period
-        self.savedir = savedir
-        self.num_images = num_images
-        self.gen_kwargs = gen_kwargs
-
-    def on_epoch_end(self, epoch, logs=None):
-        if epoch % self.period == 0:
-            print(f"[Callback] Generating images at epoch {epoch}...")
-            try:
-                self.diffusion_model.generate_images(
-                    epoch=epoch,
-                    logs=logs,
-                    savedir=self.savedir,
-                    num_images=self.num_images,
-                    **self.gen_kwargs
-                )
-            except Exception as e:
-                print(f"[Callback] Inline image generation failed: {e}")
-

@@ -1,5 +1,6 @@
 """Keras callbacks used for training the diffusion model."""
 
+import os
 import logging
 import numpy as np
 from scipy.linalg import sqrtm
@@ -48,6 +49,41 @@ class TQDMProgressBar(keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         self.pbar.close()
+
+
+class InlineImageGenerationCallback(keras.callbacks.Callback):
+    """Keras callback to generate and save images at the end of every N epochs."""
+    
+    def __init__(self, reverse_stride=50, period=10, savedir='./inline_gen', num_images=4, labels=None):
+        super().__init__()
+        self.reverse_stride = reverse_stride
+        self.period = period
+        self.savedir = savedir
+        self.num_images = num_images
+        self.labels = labels
+        os.makedirs(self.savedir, exist_ok=True)
+
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch % self.period == 0:
+            print(f"[Callback] Generating images at epoch {epoch}...")
+            images = None
+            try:
+                images = self.model.sample_images(
+                    reverse_stride=self.reverse_stride,
+                    num_images=self.num_images,
+                    clip_denoise=True,
+                    labels=self.labels,
+                )
+            except Exception as e:
+                print(f"[Callback] Inline image generation failed: {e}")
+            if images is not None:
+                images = [np.concatenate(_, axis=0) for _ in np.split(images, 2, axis=0)]
+                images = np.concatenate(images, axis=1)
+                images = (images*255.0).astype(np.uint8)
+                filename = f"epoch_{str(epoch).zfill(5)}.png"
+                filepath = f"{self.savedir}/{filename}"
+                tf.keras.utils.save_img(filepath, images)
+                print(f"[Callback] Images saved to {filepath}")
 
 
 class InlineEvalCallback(keras.callbacks.Callback):

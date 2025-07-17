@@ -43,7 +43,8 @@ from layers import (
 from unet import build_model
 from diffusion_model import DiffusionModel
 from data_loader import DataLoader
-from callbacks import WarmUpCosine, TQDMProgressBar, InlineEvalCallback
+from callbacks import WarmUpCosine, TQDMProgressBar, InlineImageGenerationCallback
+
 
 # =====================
 # Utility Functions
@@ -332,11 +333,19 @@ def train_model(config_file):
     #  mode='min',
     #  save_best_only=True,
     #  )
-        
+    
+    
+    inline_imgen_callback = InlineImageGenerationCallback(
+        period=10,
+        num_images=4,
+        labels=tf.constant([0, 1, 2, 3], tf.int32),
+    )
+    
     callback_list = [
         csv_logger,
         callback_save_ema_latest,
         TQDMProgressBar(),
+        inline_imgen_callback,
         #callback_save_ema_best,
         callback_genimages,
         #InlineEvalCallback(valid_ds, eval_interval=10000, savedir=logging_dir),
