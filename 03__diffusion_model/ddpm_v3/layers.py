@@ -60,9 +60,9 @@ class TimeEmbedding(keras.layers.Layer):
 
         half_dim = self.dim // 2
         freqs = tf.exp(-tf.math.log(self.max_period) * 
-                      tf.range(start=0, limit=half_dim, dtype=tf.float32) / half_dim)
+                      tf.range(start=0, limit=half_dim, dtype=tf.float32) / (half_dim-1))
         args = inputs[:, None] * freqs[None, :]
-        embedding = tf.concat([tf.cos(args), tf.sin(args)], axis=-1)
+        embedding = tf.concat([tf.sin(args), tf.cos(args)], axis=-1)
         return embedding
 
     def get_config(self):
