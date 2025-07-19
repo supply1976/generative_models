@@ -153,9 +153,8 @@ def train_model(config_file):
     dataset_name   = dataset_dict['NAME']
     dataset_path   = dataset_dict['PATH']
     label_key      = dataset_dict.get('LABEL_KEY')
-    crop_size = dataset_dict['PREPROCESSING']['CROP_SIZE']
-    CLIP_MIN  = dataset_dict['PREPROCESSING']['CLIP_MIN']
-    CLIP_MAX  = dataset_dict['PREPROCESSING']['CLIP_MAX']
+    crop_size      = dataset_dict['PREPROCESSING'].get('CROP_SIZE')
+    crop_type      = dataset_dict['PREPROCESSING'].get('CROP_TYPE')
 
     # input shape
     input_image_size    = training_dict['INPUT_IMAGE_SIZE']
@@ -167,6 +166,12 @@ def train_model(config_file):
     trained_h5         = training_dict['TRAINED_H5']
     pred_type          = training_dict['PRED_TYPE']
     loss_fn            = training_dict['LOSS_FN']
+    # control the inline image gen during training
+    inline_gen_dict    = training_dict['INLINE_GEN']
+    inline_gen_enable  = inline_gen_dict['ENABLE']
+    inline_gen_nums    = inline_gen_dict.get('NUMS', 20)
+    inline_gen_period  = inline_gen_dict.get('PERIOD', 10)
+    inline_gen_reverse_stride = inline_gen_dict.get('REVERSE_STRIDE', 10)
     # network
     scheduler          = training_dict['NETWORK']['SCHEDULER']
     timesteps          = training_dict['NETWORK']['TIMESTEPS']
@@ -189,13 +194,11 @@ def train_model(config_file):
     # hyper-parameters
     epochs          = training_dict['HYPER_PARAMETERS']['EPOCHS']
     batch_size      = training_dict['HYPER_PARAMETERS']['BATCH_SIZE']
+    steps_per_epoch = training_dict['HYPER_PARAMETERS']['STEPS_PER_EPOCH']
     lr_type         = training_dict['HYPER_PARAMETERS']['LR_TYPE']
     learning_rate   = training_dict['HYPER_PARAMETERS']['LEARNING_RATE']
     warmup_steps    = training_dict['HYPER_PARAMETERS']['WARMUP_STEPS']
-    steps_per_epoch = training_dict['HYPER_PARAMETERS']['STEPS_PER_EPOCH']
     total_steps = None if steps_per_epoch is None else epochs * steps_per_epoch
-    
-    clip_denoise = imgen_dict.get('CLIP_DENOISE', False)
     
     # GPU devices
     gpus = tf.config.list_physical_devices("GPU")
@@ -226,7 +229,7 @@ def train_model(config_file):
     diff_util_train = DiffusionUtility(
         b0=0.1, b1=20, timesteps=timesteps, 
         scheduler=scheduler, pred_type=pred_type, reverse_stride=1, 
-        clip_denoise=clip_denoise,
+        clip_denoise=False,
         )
 
     # Get the diffusion model (keras.Model)
@@ -309,11 +312,6 @@ def train_model(config_file):
     assert c==input_image_channel
     assert h==input_image_size
     
-    callback_save_ema_latest = keras.callbacks.LambdaCallback(
-        on_epoch_end=lambda epoch, logs: ddpm.save_model(epoch, savedir=logging_dir))
-    callback_genimages = keras.callbacks.LambdaCallback(
-        on_train_end=lambda logs: ddpm.generate_images_and_save(logs=None))
-        
     logging.info("[INFO] Forward Training Steps: {}".format(timesteps))
     logging.info("[INFO] Noise Scheduler: {} ".format(scheduler))
     logging.info("[INFO] Learning Rate Type: {}".format(lr_type))
@@ -334,24 +332,31 @@ def train_model(config_file):
     #  save_best_only=True,
     #  )
     
+    save_ema_models_callback = keras.callbacks.LambdaCallback(
+        on_epoch_end=lambda epoch, logs: ddpm.save_ema_model(epoch, savedir=logging_dir))
+    train_end_imgen_callback = keras.callbacks.LambdaCallback(
+        on_train_end=lambda logs: ddpm.generate_images_and_save(logs=None))
     
-    inline_imgen_callback = InlineImageGenerationCallback(
-        period=10,
-        num_images=4,
-        labels=tf.constant([0, 1, 2, 3], tf.int32),
-    )
+    if inline_gen_enable:
+        inline_imgen_callback = InlineImageGenerationCallback(
+            period=inline_gen_period,
+            num_images=inline_gen_nums,
+            reverse_stride=inline_gen_reverse_stride,
+            savedir = os.path.join(logging_dir, 'inline_gen'),
+            labels=None,
+        )
     
     callback_list = [
         csv_logger,
-        callback_save_ema_latest,
+        save_ema_models_callback,
+        train_end_imgen_callback,
         TQDMProgressBar(),
-        inline_imgen_callback,
-        #callback_save_ema_best,
-        callback_genimages,
         #InlineEvalCallback(valid_ds, eval_interval=10000, savedir=logging_dir),
         #keras.callbacks.EarlyStopping(monitor='val_loss', patience=10,
         #                              restore_best_weights=True),
         ]
+    if inline_gen_enable:
+        callback_list.append(inline_imgen_callback)
 
     if loss_fn == "MAE":
         loss_fn = keras.losses.MeanAbsoluteError()
@@ -415,27 +420,33 @@ def generate_images(config_file):
     export_interm    = imgen_dict['EXPORT_INTERM']
     reverse_stride   = imgen_dict['REVERSE_STRIDE']
     gen_inputs       = imgen_dict['GEN_INPUTS']
+    freeze_channel   = imgen_dict.get('FREEZE_CHANNEL', 0)
     gen_output_dir   = imgen_dict['GEN_OUTPUT_DIR']
     ddim_eta         = imgen_dict['DDIM_ETA']
     random_seed      = imgen_dict['RANDOM_SEED']
     class_label      = imgen_dict.get('CLASS_LABEL')
+    clip_denoise     = imgen_dict.get('CLIP_DENOISE', False)
     num_classes      = training_dict['NETWORK'].get('NUM_CLASSES')
     timesteps        = training_dict['NETWORK']['TIMESTEPS']
     scheduler        = training_dict['NETWORK']['SCHEDULER']
     pred_type        = training_dict['PRED_TYPE']
-    
-    clip_denoise = imgen_dict.get('CLIP_DENOISE', False)
 
+    if gen_inputs is not None:
+        gen_inputs = np.load(gen_inputs)['images']
+        gen_inputs = 2.0*gen_inputs -1 
+        print(gen_inputs.shape)
+
+    assert imgen_model_path is not None
+    assert os.path.isfile(imgen_model_path)
+    model_dir = os.path.dirname(imgen_model_path)
+    gen_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    
     # util for inference
     diff_util_infer = DiffusionUtility(
         b0=0.1, b1=20, timesteps=timesteps, 
         scheduler=scheduler, pred_type=pred_type, reverse_stride=reverse_stride,
         ddim_eta=ddim_eta, clip_denoise=clip_denoise,
         )
-    assert imgen_model_path is not None
-    assert os.path.isfile(imgen_model_path)
-    model_dir = os.path.dirname(imgen_model_path)
-    gen_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     
     ema_model = keras.models.load_model(
         imgen_model_path,
@@ -459,11 +470,11 @@ def generate_images(config_file):
         os.mkdir(gen_dir)
     else:
         gen_dir = gen_output_dir
-        if not os.path.isdir(gen_dir): os.mkdir(gen_dir)
+        os.makedirs(gen_dir, exist_ok=True)
         
     init_logging(os.path.join(gen_dir, "imgen.log"))
     logging.info("[IMGEN] Start to generate images using model: {}".format(imgen_model_path))
-    logging.info("[IMGEN] model predict type: {}".format(diff_util_infer.pred_type))
+    logging.info("[IMGEN] Model Predict type: {}".format(diff_util_infer.pred_type))
     logging.info("[IMGEN] DDIM eta = {}".format(diff_util_infer.ddim_eta))
     logging.info("[IMGEN] Set random seed: {}".format(random_seed))
     logging.info("[IMGEN] clip_denoise: {}".format(clip_denoise))
@@ -472,48 +483,15 @@ def generate_images(config_file):
 
     tf.random.set_seed(random_seed)
 
-    if gen_inputs is None:
-        logging.info("Generating Images from standard Gaussian noise")
-        pass
-
-    elif os.path.isfile(gen_inputs) and gen_inputs.endswith('npz'):
-        logging.info("Use external .npz file as start to generate images")
-        logging.info("Generating Images from {}".format(gen_inputs))
-        data = np.load(gen_inputs)['images']
-        gen_inputs = tf.identity(data, tf.float32)
-        
-    elif gen_inputs == "identical_noise":
-        logging.info("Generating Images from identical Gaussian noise")
-        _shape=(1, input_image_size, input_image_size, input_image_channel)
-        gen_inputs = tf.random.normal(shape=_shape, dtype=tf.float32)
-        gen_inputs = tf.tile(gen_inputs, [num_gen_images, 1,1,1])
-
-    elif gen_inputs == "custom":
-        _shape=(1, input_image_size, input_image_size, input_image_channel)
-        tf.random.set_seed(1)
-        z1 = tf.random.normal(shape=_shape, dtype=tf.float32)
-        tf.random.set_seed(2)
-        z2 = tf.random.normal(shape=_shape, dtype=tf.float32)
-        theta = np.linspace(0, 1, 11)
-        v = np.cos(theta*np.pi/2)
-        z = (v[:,None,None,None])*z1 + np.sqrt((1-v[:,None,None,None]**2))*z2
-        gen_inputs = z
-
-    elif gen_inputs == "gen_random_seed_map":
-        _shape=(1, input_image_size, input_image_size, input_image_channel)
-        zlist = []
-        for seed in range(10):
-            tf.random.set_seed(seed)
-            zlist.append(tf.random.normal(shape=_shape, dtype=tf.float32))
-        gen_inputs = tf.concat(zlist, axis=0)
-        
-    else:
-        return
-
     labels = None
-    if class_label is not None:
+    if isinstance(class_label, int):
         labels = tf.fill([num_gen_images], int(class_label))
-    
+    elif isinstance(class_label, list):
+        labels = np.random.choice(class_label*num_gen_images, num_gen_images)
+        labesl = tf.constant(labels, tf.int32)
+    else:
+        labels = None
+
     t0 = time.time()
 
     ddpm_infer.generate_images_and_save(
@@ -523,7 +501,7 @@ def generate_images(config_file):
         gen_inputs=gen_inputs,
         labels=labels,
         inpaint_mask=None,
-        freeze_channel=None,
+        freeze_channel=freeze_channel,
         export_intermediate=export_interm,
         enable_memory_logging=True,
         memory_log_path=os.path.join(gen_dir, "memory_log.txt"),

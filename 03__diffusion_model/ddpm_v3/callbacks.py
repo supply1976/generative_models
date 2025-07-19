@@ -64,23 +64,23 @@ class InlineImageGenerationCallback(keras.callbacks.Callback):
         os.makedirs(self.savedir, exist_ok=True)
 
     def on_epoch_end(self, epoch, logs=None):
-        if epoch % self.period == 0:
-            print(f"[Callback] Generating images at epoch {epoch}...")
+        if (epoch+1) % self.period == 0:
+            print(f"[Callback] Inline Generating {self.num_images} images at epoch {epoch+1}...")
             images = None
             try:
                 images = self.model.sample_images(
                     reverse_stride=self.reverse_stride,
                     num_images=self.num_images,
-                    clip_denoise=True,
+                    clip_denoise=False,
                     labels=self.labels,
                 )
             except Exception as e:
                 print(f"[Callback] Inline image generation failed: {e}")
             if images is not None:
-                images = [np.concatenate(_, axis=0) for _ in np.split(images, 2, axis=0)]
-                images = np.concatenate(images, axis=1)
+                images = [np.concatenate(_, axis=1) for _ in np.split(images, 2, axis=0)]
+                images = np.concatenate(images, axis=0)
                 images = (images*255.0).astype(np.uint8)
-                filename = f"epoch_{str(epoch).zfill(5)}.png"
+                filename = f"epoch_{str(epoch+1).zfill(5)}.png"
                 filepath = f"{self.savedir}/{filename}"
                 tf.keras.utils.save_img(filepath, images)
                 print(f"[Callback] Images saved to {filepath}")

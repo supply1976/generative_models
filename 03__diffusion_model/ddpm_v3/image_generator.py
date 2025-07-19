@@ -35,14 +35,13 @@ class ImageGenerator:
     def _prepare_initial_samples(self, num_images, gen_inputs=None):
         """Prepare initial noise samples for generation."""
         img_size, img_channel = self._get_input_shape()
-        
-        if gen_inputs is None:
-            shape = (num_images, img_size, img_size, img_channel)
-            samples = tf.random.normal(shape=shape, dtype=tf.float32)
-        else:
-            samples = gen_inputs
-            
-        return samples
+
+        shape = (num_images, img_size, img_size, img_channel)
+        if gen_inputs is not None:
+            shape = gen_inputs.shape
+            gen_inputs = tf.convert_to_tensor(gen_inputs, dtype=tf.float32)
+        samples = tf.random.normal(shape=shape, dtype=tf.float32) 
+        return (samples, gen_inputs)
     
     def _prepare_labels(self, num_images, labels=None):
         """Prepare class labels for conditional generation."""
@@ -57,7 +56,7 @@ class ImageGenerator:
         inputs = [samples, tt]
         if labels is not None:
             inputs.append(labels)
-            
+        
         y_pred = self.ema_network(inputs, training=False)
         pred_noise, pred_image, pred_velocity = self.diff_util.get_pred_components(
             samples, tt, self.diff_util.pred_type, y_pred, clip_denoise=clip_denoise
@@ -95,7 +94,13 @@ class ImageGenerator:
             output_images[output_images > 0.99] = 1
         return output_images
     
-    def sample_images(self, reverse_stride=10, num_images=20, clip_denoise=False, gen_inputs=None, labels=None):
+    def sample_images(self,
+                      reverse_stride=10, 
+                      num_images=20, 
+                      clip_denoise=False, 
+                      gen_inputs=None, 
+                      labels=None,
+                      ):
         """
         Generate samples and return them as numpy arrays.
         
@@ -116,7 +121,7 @@ class ImageGenerator:
         alpha = self.diff_util._compute_alphas()
         self.diff_util._compute_reverse_coefficients(alpha)
         
-        samples = self._prepare_initial_samples(num_images, gen_inputs)
+        samples, _ = self._prepare_initial_samples(num_images, gen_inputs)
         labels = self._prepare_labels(num_images, labels)
         
         reverse_timeindex = np.arange(self.timesteps, 0, -reverse_stride, dtype=np.int32)
@@ -140,7 +145,7 @@ class ImageGenerator:
                                  inpaint_mask=None,
                                  freeze_channel=None,
                                  export_intermediate=False,
-                                 enable_memory_logging=True,
+                                 enable_memory_logging=False,
                                  memory_log_path=None,
                                  ):
         """
@@ -162,11 +167,14 @@ class ImageGenerator:
         """
         img_size, img_channel = self._get_input_shape()
         print(f"Input shape: ({img_size}, {img_size}, {img_channel})")
-        
-        samples = self._prepare_initial_samples(num_images, gen_inputs)
+       
+        #
+        samples, gen_inputs = self._prepare_initial_samples(num_images, gen_inputs)
+        # samples is pure gaussian noise here
+        #
         labels = self._prepare_labels(num_images, labels)
         
-        n_imgs, height, width, _ = samples.shape
+        n_imgs = samples.shape[0]
         print(f"Generating {n_imgs} images...")
         
         if gen_inputs is not None and freeze_channel is not None:
@@ -174,17 +182,11 @@ class ImageGenerator:
             if freeze_channel < 0 or freeze_channel >= img_channel:
                 raise ValueError(f"freeze_channel must be in range [0, {img_channel - 1}]")
             # Create a mask that zeros out the specified channel
-            # This assumes gen_inputs is a tensor of shape (num_images, height, width, img_channel)
-            gen_inputs = tf.convert_to_tensor(gen_inputs, dtype=tf.float32)
-            if inpaint_mask is None:
-                inpaint_mask = tf.ones_like(gen_inputs)
+            inpaint_mask = np.ones_like(gen_inputs)
             inpaint_mask[..., freeze_channel] = 0
-        elif gen_inputs is not None:
-            # If gen_inputs is provided but no freeze_channel, use it directly
-            gen_inputs = tf.convert_to_tensor(gen_inputs, dtype=tf.float32)
-        else:
-            gen_inputs = None
-        
+            inpaint_mask = tf.convert_to_tensor(inpaint_mask)
+            # update the samples for the input of inpaint generation
+            samples = samples * inpaint_mask + gen_inputs * (1 - inpaint_mask)
         # Prepare output dictionary
         output_dict = {}
         if export_intermediate:
@@ -202,12 +204,21 @@ class ImageGenerator:
         reverse_timeindex = np.arange(
             self.timesteps, 0, -reverse_stride, dtype=np.int32
         )
-        
-        for j, t in enumerate(tqdm.tqdm(reverse_timeindex)):
-            samples = self._denoise_step(
-                samples, tf.constant(t, dtype=tf.int32), clip_denoise, labels
-            )
-            
+        use_predict = True if n_imgs>100 else False 
+        for t in tqdm.tqdm(reverse_timeindex):
+            if use_predict:
+                samples = self._denoise_step_use_predict(
+                    samples, tf.constant(t, dtype=tf.int32), clip_denoise, labels)
+                # TODO
+                # apply gc.collect()
+                # this is workaround to resove memory leak issue in TF 2.12 
+                # when iteratively calling model.predict() to do inference
+                # calling gc.collect() in everytime step will down-grade the performance
+                # but resolve the memory accumulation issue
+                gc.collect() 
+            else:
+                samples = self._denoise_step(
+                    samples, tf.constant(t, dtype=tf.int32), clip_denoise, labels)
             # Memory logging
             if enable_memory_logging:
                 try:
@@ -254,7 +265,7 @@ class MemoryLogger:
     
     def __enter__(self):
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
-        self.log_file = open(self.log_path, 'w')
+        self.log_file = open(self.log_path, 'a')
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -266,7 +277,6 @@ class MemoryLogger:
         if self.log_file is None:
             return
             
-        gc.collect()
         try:
             mem = tf.config.experimental.get_memory_info("GPU:0")
         except Exception:

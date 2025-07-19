@@ -118,13 +118,13 @@ class DiffusionModel(keras.Model):
         self.velocity_loss_tracker.update_state(velocity_loss)
         return {m.name: m.result() for m in self.metrics}
 
-    def save_model(self, epoch, logs='mylog.txt', savedir=None):
+    def save_ema_model(self, epoch, logs='mylog.txt', savedir=None):
         if savedir is None:
             savedir = './saved_models'
         os.makedirs(savedir, exist_ok=True)
-        epo = str(epoch).zfill(5)
+        epo = str(epoch+1).zfill(5)
         output_name = "unet_tf" + tf.__version__ + "ema_"
-        if epoch % 100 == 0 and epoch > 0:
+        if (epoch+1) % 100 == 0 and epoch > 0:
             path_unet_ema_epo = os.path.join(savedir, output_name+f"epoch_{epo}")
             self.ema_network.save(path_unet_ema_epo + ".h5", include_optimizer=False)
             

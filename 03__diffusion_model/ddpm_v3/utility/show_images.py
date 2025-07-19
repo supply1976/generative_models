@@ -81,7 +81,7 @@ def main():
     feats = np.around(df[['Hx','Hy']].values, 2)
     print(feats.shape)
 
-  display_images(images, 4, 5)
+  display_images(images, 2, 2)
   
   #images_t = data['images_t_300']
   #display_images(images_t, 4, 5)
