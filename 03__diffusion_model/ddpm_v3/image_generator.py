@@ -32,17 +32,6 @@ class ImageGenerator:
         _, img_size, _, img_channel = img_input.shape
         return img_size, img_channel
     
-    def _prepare_initial_samples(self, num_images, gen_inputs=None):
-        """Prepare initial noise samples for generation."""
-        img_size, img_channel = self._get_input_shape()
-
-        shape = (num_images, img_size, img_size, img_channel)
-        if gen_inputs is not None:
-            shape = gen_inputs.shape
-            gen_inputs = tf.convert_to_tensor(gen_inputs, dtype=tf.float32)
-        samples = tf.random.normal(shape=shape, dtype=tf.float32) 
-        return (samples, gen_inputs)
-    
     def _prepare_labels(self, num_images, labels=None):
         """Prepare class labels for conditional generation."""
         if labels is None and self.num_classes is not None:
@@ -98,7 +87,6 @@ class ImageGenerator:
                       reverse_stride=10, 
                       num_images=20, 
                       clip_denoise=False, 
-                      gen_inputs=None, 
                       labels=None,
                       ):
         """
@@ -120,8 +108,10 @@ class ImageGenerator:
         self.diff_util.reverse_stride = reverse_stride
         alpha = self.diff_util._compute_alphas()
         self.diff_util._compute_reverse_coefficients(alpha)
-        
-        samples, _ = self._prepare_initial_samples(num_images, gen_inputs)
+        # prepare initial samples and labels 
+        img_size, img_channel = self._get_input_shape()
+        shape = (num_images, img_size, img_size, img_channel)
+        samples = tf.random.normal(shape=shape, dtype=tf.float32) 
         labels = self._prepare_labels(num_images, labels)
         
         reverse_timeindex = np.arange(self.timesteps, 0, -reverse_stride, dtype=np.int32)
@@ -136,57 +126,61 @@ class ImageGenerator:
     
     def generate_images_and_save(self,
                                  logs=None,
+                                 gen_task="random_uncond",
                                  reverse_stride=10,
                                  savedir='./',
                                  num_images=20,
                                  clip_denoise=False, 
-                                 gen_inputs=None,
+                                 base_images=None,
                                  labels=None,
                                  inpaint_mask=None,
                                  freeze_channel=None,
                                  export_intermediate=False,
                                  enable_memory_logging=False,
                                  memory_log_path=None,
+                                 save_to_npz=True,
                                  ):
         """
         Generate images with optional intermediate saving and progress tracking.
         
         Args:
+            gen_task:
+            reverse_stride:
+            savedir:
             num_images: Number of images to generate
             clip_denoise: Whether to clip denoising predictions
-            gen_inputs: Optional initial samples
+            base_images:
             labels: Optional class labels
             inpaint_mask: Optional mask for inpainting (if gen_inputs is provided)
             freeze_channel: Optional channel to freeze for inpainting (if gen_inputs is provided)
             export_intermediate: Whether to export intermediate timesteps
             enable_memory_logging: Whether to log memory usage during generation
             memory_log_path: Path to save memory logs (if enabled)
+            save_to_npz:
             
         Returns:
             dict: Dictionary containing generated images and optional intermediate steps
         """
         img_size, img_channel = self._get_input_shape()
         print(f"Input shape: ({img_size}, {img_size}, {img_channel})")
-       
-        #
-        samples, gen_inputs = self._prepare_initial_samples(num_images, gen_inputs)
-        # samples is pure gaussian noise here
-        #
+        shape = (num_images, img_size, img_size, img_channel)
+        samples = tf.random.normal(shape=shape, dtype=tf.float32) 
         labels = self._prepare_labels(num_images, labels)
         
-        n_imgs = samples.shape[0]
-        print(f"Generating {n_imgs} images...")
+        print(f"Generating {num_images} images...")
         
-        if gen_inputs is not None and freeze_channel is not None:
-            # channel-wise inpaint masking
+        if gen_task == 'channel_inpaint':
+            assert base_images is not None
+            assert freeze_channel is not None
             if freeze_channel < 0 or freeze_channel >= img_channel:
                 raise ValueError(f"freeze_channel must be in range [0, {img_channel - 1}]")
             # Create a mask that zeros out the specified channel
-            inpaint_mask = np.ones_like(gen_inputs)
+            inpaint_mask = np.ones_like(base_images)
             inpaint_mask[..., freeze_channel] = 0
             inpaint_mask = tf.convert_to_tensor(inpaint_mask)
+            #base_images = tf.convert_to_tensor(base_images)
             # update the samples for the input of inpaint generation
-            samples = samples * inpaint_mask + gen_inputs * (1 - inpaint_mask)
+            samples = samples * inpaint_mask + base_images * (1 - inpaint_mask)
         # Prepare output dictionary
         output_dict = {}
         if export_intermediate:
@@ -204,7 +198,7 @@ class ImageGenerator:
         reverse_timeindex = np.arange(
             self.timesteps, 0, -reverse_stride, dtype=np.int32
         )
-        use_predict = True if n_imgs>100 else False 
+        use_predict = True if num_images>100 else False 
         for t in tqdm.tqdm(reverse_timeindex):
             if use_predict:
                 samples = self._denoise_step_use_predict(
@@ -228,7 +222,7 @@ class ImageGenerator:
                     print(f"Memory logging failed: {e}")
             
             if inpaint_mask is not None:
-                samples = samples * inpaint_mask + gen_inputs * (1 - inpaint_mask)
+                samples = samples * inpaint_mask + base_images * (1 - inpaint_mask)
             
             # Export intermediate results
             if export_intermediate and t % 10 == 0:
@@ -238,18 +232,19 @@ class ImageGenerator:
         # Final postprocessing
         output_images = self._postprocess_images(samples)
         output_dict['images'] = output_images
-        shape_str = "x".join(map(str, output_images.shape))
-        eta = str(self.diff_util.ddim_eta)
-        revs = str(self.diff_util.reverse_stride)
+        if save_to_npz:
+            shape_str = "x".join(map(str, output_images.shape))
+            eta = str(self.diff_util.ddim_eta)
+            revs = str(self.diff_util.reverse_stride)
         
-        filename = f"ddim_eta{eta}_rev{revs}_gen_{shape_str}_tf{tf.__version__}"
-        if not clip_denoise:
-            filename += "_raw"
+            filename = f"ddim_eta{eta}_rev{revs}_gen_{shape_str}_tf{tf.__version__}"
+            if not clip_denoise:
+                filename += "_raw"
             
-        filepath = os.path.join(savedir, filename)
-        os.makedirs(savedir, exist_ok=True)
-        np.savez_compressed(filepath, **output_dict)
-        print(f"Images saved to {filepath}.npz")
+            filepath = os.path.join(savedir, filename)
+            os.makedirs(savedir, exist_ok=True)
+            np.savez_compressed(filepath, **output_dict)
+            print(f"Images saved to {filepath}.npz")
         
         return output_dict
 

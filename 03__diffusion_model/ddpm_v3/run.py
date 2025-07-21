@@ -415,27 +415,26 @@ def generate_images(config_file):
     """
     dataset_dict, training_dict, imgen_dict = parse_config(config_file)
     # for image generation (imgen)
-    imgen_model_path = imgen_dict['MODEL_PATH']
-    num_gen_images   = imgen_dict['NUM_GEN_IMAGES']
-    export_interm    = imgen_dict['EXPORT_INTERM']
-    reverse_stride   = imgen_dict['REVERSE_STRIDE']
-    gen_inputs       = imgen_dict['GEN_INPUTS']
-    freeze_channel   = imgen_dict.get('FREEZE_CHANNEL', 0)
-    gen_output_dir   = imgen_dict['GEN_OUTPUT_DIR']
-    ddim_eta         = imgen_dict['DDIM_ETA']
-    random_seed      = imgen_dict['RANDOM_SEED']
-    class_label      = imgen_dict.get('CLASS_LABEL')
-    clip_denoise     = imgen_dict.get('CLIP_DENOISE', False)
+    imgen_model_path     = imgen_dict['MODEL_PATH']
+    gen_task             = imgen_dict.get('GEN_TASK', 'random_uncond')
+    num_gen_images       = imgen_dict.get('NUM_GEN_IMAGES', 20)
+    external_npz_input   = imgen_dict.get('EXTERNAL_NPZ_INPUT')
+    class_label          = imgen_dict.get('CLASS_LABEL')
+    freeze_channel       = imgen_dict.get('FREEZE_CHANNEL')
+    reverse_stride       = imgen_dict.get('REVERSE_STRIDE', 10)
+    ddim_eta             = imgen_dict.get('DDIM_ETA', 1.0)
+    # 
+    export_interm        = imgen_dict.get('EXPORT_INTERM', False)
+    gen_save_dir         = imgen_dict.get('GEN_SAVE_DIR')
+    random_seed          = imgen_dict.get('RANDOM_SEED')
+    clip_denoise         = imgen_dict.get('CLIP_DENOISE', False)
+    #
     num_classes      = training_dict['NETWORK'].get('NUM_CLASSES')
     timesteps        = training_dict['NETWORK']['TIMESTEPS']
     scheduler        = training_dict['NETWORK']['SCHEDULER']
     pred_type        = training_dict['PRED_TYPE']
 
-    if gen_inputs is not None:
-        gen_inputs = np.load(gen_inputs)['images']
-        gen_inputs = 2.0*gen_inputs -1 
-        print(gen_inputs.shape)
-
+    assert gen_task is not None
     assert imgen_model_path is not None
     assert os.path.isfile(imgen_model_path)
     model_dir = os.path.dirname(imgen_model_path)
@@ -461,27 +460,47 @@ def generate_images(config_file):
         diff_util=diff_util_infer,
         num_classes=num_classes,
         )
-    
-    if gen_output_dir is None: 
-        gen_steps = str(diff_util_infer.timesteps // diff_util_infer.reverse_stride)+"steps"
-        gen_dir ="_".join([
-            "imgen", gen_steps, "tf"+tf.__version__, os.uname().nodename, gen_date])
-        gen_dir = os.path.join(model_dir, gen_dir)
-        os.mkdir(gen_dir)
+   
+    if gen_task=="random_uncond":
+        external_npz_input = None
+    elif gen_task=='channel_inpaint':
+        assert external_npz_input is not None
+        assert freeze_channel is not None
+    elif gen_task=='class_cond':
+        assert class_label is not None
+        assert num_classes is not None
     else:
-        gen_dir = gen_output_dir
-        os.makedirs(gen_dir, exist_ok=True)
+        raise NotImplementedError
+    
+    if gen_save_dir is None: 
+        gen_steps = str(diff_util_infer.timesteps // diff_util_infer.reverse_stride)+"steps"
+        gen_save_dir ="_".join([
+            "imgen", gen_steps, gen_task, os.uname().nodename, gen_date])
+        gen_save_dir = os.path.join(model_dir, gen_save_dir)
+    os.makedirs(gen_save_dir, exist_ok=True)
         
-    init_logging(os.path.join(gen_dir, "imgen.log"))
+    init_logging(os.path.join(gen_save_dir, "imgen.log"))
     logging.info("[IMGEN] Start to generate images using model: {}".format(imgen_model_path))
-    logging.info("[IMGEN] Model Predict type: {}".format(diff_util_infer.pred_type))
+    logging.info("[IMGEN] Generation Task: {}".format(gen_task))
+    logging.info("[IMGEN] External npz: {}".format(external_npz_input))
+    logging.info("[IMGEN] freeze channel: {}".format(freeze_channel))
+    logging.info("[IMGEN] class label: {}".format(class_label))
+    logging.info("[IMGEN] Model Predict Type: {}".format(diff_util_infer.pred_type))
     logging.info("[IMGEN] DDIM eta = {}".format(diff_util_infer.ddim_eta))
-    logging.info("[IMGEN] Set random seed: {}".format(random_seed))
+    logging.info("[IMGEN] Set Random Seed: {}".format(random_seed))
     logging.info("[IMGEN] clip_denoise: {}".format(clip_denoise))
     logging.info("[IMGEN] hostname: {}".format(os.uname().nodename))
     logging.info("[IMGEN] TF version: {}".format(tf.__version__))
 
     tf.random.set_seed(random_seed)
+
+    base_images = None
+    if external_npz_input is not None:
+        assert os.path.isfile(external_npz_input)
+        base_images = np.load(external_npz_input)['images'].astype(np.float32)
+        assert len(base_images.shape)==4
+        num_gen_images = base_images.shape[0]
+        base_images = 2.0*base_images - 1.0
 
     labels = None
     if isinstance(class_label, int):
@@ -495,21 +514,25 @@ def generate_images(config_file):
     t0 = time.time()
 
     ddpm_infer.generate_images_and_save(
-        savedir=gen_dir,
+        gen_task=gen_task,
+        reverse_stride=reverse_stride,
+        savedir=gen_save_dir,
         num_images=num_gen_images,
         clip_denoise=clip_denoise,
-        gen_inputs=gen_inputs,
+        base_images=base_images,
         labels=labels,
         inpaint_mask=None,
         freeze_channel=freeze_channel,
         export_intermediate=export_interm,
         enable_memory_logging=True,
-        memory_log_path=os.path.join(gen_dir, "memory_log.txt"),
+        memory_log_path=os.path.join(gen_save_dir, "memory_log.txt"),
+        save_to_npz=True,
         )
     #
     deltaT = np.around((time.time()-t0), 1)
-    logging.info("Generated {} images with {} seconds".format(num_gen_images, deltaT))
-    logging.info("[IMGEN] Generated images saved to: {}".format(gen_dir))
+    logging.info("Generation images completed with {} seconds".format(deltaT))
+    logging.info(
+        "[IMGEN] {} images generated and save to {}".format(num_gen_images, gen_save_dir))
     
     return None
 
