@@ -4,6 +4,10 @@ DATASET:
   LABEL_KEY: label
   PREPROCESSING:
     CROP_SIZE:
+    CROP_TYPE: random  # Options: center, random, corner, smart, multi_crop
+    CROP_POSITION:  # For corner cropping: top_left, top_right, bottom_left, bottom_right, center
+    AUGMENT: false  # Enable data augmentation (rotation, flip, brightness, contrast)
+    AUGMENT_TYPE:   # fliplr, flipud
     CLIP_MIN: -1.0
     CLIP_MAX: 1.0
 
@@ -33,9 +37,9 @@ TRAINING:
     NUM_RES_BLOCKS: 2
     NORM_GROUPS: 8
     TIME_EMB_DIM: 128
-    FIRST_CHANNEL: 16
-    CHANNEL_MULTIPLIER: [1, 2, 4, 8]
-    HAS_ATTENTION: [False, False, True, True]
+    FIRST_CHANNEL: 32
+    CHANNEL_MULTIPLIER: [1, 2, 4]
+    HAS_ATTENTION: [False, False, True]
     NUM_HEADS: 1
     NUM_CLASSES: 26
   OUTPUT_DIR: "./training_outputs"

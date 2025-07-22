@@ -99,41 +99,38 @@ def build_models(image_size, image_channel, widths, has_attention,
     return network, ema_network
 
 def prepare_datasets(dataset_path, img_size, batch_size, crop_size=None,
-                     label_key=None, dtype=tf.float32):
+                     crop_type=None, crop_position=None, augment=False,
+                     augment_type=None, label_key=None, dtype=tf.float32):
     """
     Prepare training and validation datasets with efficient prefetching.
+    
+    Args:
+        dataset_path: Path to dataset directory or .npz file
+        img_size: Target image size after preprocessing
+        batch_size: Batch size for training
+        crop_size: Size for cropping (if None, uses img_size)
+        crop_type: Type of cropping ('center', 'random', 'corner', 'smart', 'multi_crop')
+        crop_position: Position for corner cropping ('top_left', 'top_right', etc.)
+        augment: Enable data augmentation during training
+        augment_type: Type of augmentation (e.g., 'fliplr')
+        label_key: Key for labels in dataset
+        dtype: Data type for tensors
     """
     autotune = tf.data.AUTOTUNE
+    train_ds, valid_ds = None, None
     if os.path.isdir(dataset_path):
         dataloader = DataLoader(
             data_dir=dataset_path,
             img_size=img_size,
             crop_size=crop_size,
+            crop_type=crop_type,
+            crop_position=crop_position,
+            augment=augment,
+            augment_type=augment_type,
             label_key=label_key,
         )
         train_ds, valid_ds = dataloader._get_dataset()
-    else:
-        data = np.load(dataset_path)
-        all_images = 2 * data['images'] - 1.0
-        labels = data[label_key] if (label_key is not None and label_key in data) else None
-        idx = np.arange(len(all_images))
-        np.random.shuffle(idx)
-        num_val = int(0.1 * len(all_images))
-        if labels is None:
-            train_ds = tf.data.Dataset.from_tensor_slices(all_images)
-            valid_ds = tf.data.Dataset.from_tensor_slices(all_images[0:num_val])
-            train_ds = train_ds.map(lambda x: tf.cast(x, dtype), num_parallel_calls=autotune)
-            valid_ds = valid_ds.map(lambda x: tf.cast(x, dtype), num_parallel_calls=autotune)
-            train_ds = train_ds.cache().shuffle(buffer_size=10000).repeat()
-            valid_ds = valid_ds.cache()
-        else:
-            train_ds = tf.data.Dataset.from_tensor_slices((all_images, labels))
-            valid_ds = tf.data.Dataset.from_tensor_slices((all_images[0:num_val], labels[0:num_val]))
-            train_ds = train_ds.map(lambda x,y: (tf.cast(x, dtype), tf.cast(y, tf.int32)), num_parallel_calls=autotune)
-            valid_ds = valid_ds.map(lambda x,y: (tf.cast(x, dtype), tf.cast(y, tf.int32)), num_parallel_calls=autotune)
-            train_ds = train_ds.cache().shuffle(buffer_size=10000).repeat()
-            valid_ds = valid_ds.cache()
-
+    
     train_ds = train_ds.batch(batch_size, drop_remainder=True)
     valid_ds = valid_ds.batch(batch_size)
     train_ds = train_ds.prefetch(autotune)
@@ -154,7 +151,9 @@ def train_model(config_file):
     dataset_path   = dataset_dict['PATH']
     label_key      = dataset_dict.get('LABEL_KEY')
     crop_size      = dataset_dict['PREPROCESSING'].get('CROP_SIZE')
-    crop_type      = dataset_dict['PREPROCESSING'].get('CROP_TYPE')
+    crop_type      = dataset_dict['PREPROCESSING'].get('CROP_TYPE', 'center')
+    crop_position  = dataset_dict['PREPROCESSING'].get('CROP_POSITION', 'center')
+    augment        = dataset_dict['PREPROCESSING'].get('AUGMENT', False)
 
     # input shape
     input_image_size    = training_dict['INPUT_IMAGE_SIZE']
@@ -199,6 +198,9 @@ def train_model(config_file):
     learning_rate   = training_dict['HYPER_PARAMETERS']['LEARNING_RATE']
     warmup_steps    = training_dict['HYPER_PARAMETERS']['WARMUP_STEPS']
     total_steps = None if steps_per_epoch is None else epochs * steps_per_epoch
+    
+    if crop_size is not None:
+        input_image_size = crop_size
     
     # GPU devices
     gpus = tf.config.list_physical_devices("GPU")
@@ -297,6 +299,9 @@ def train_model(config_file):
         img_size=input_image_size,
         batch_size=batch_size,
         crop_size=crop_size,
+        crop_type=crop_type,
+        crop_position=crop_position,
+        augment=augment,
         label_key=label_key,
         )
           
@@ -311,6 +316,12 @@ def train_model(config_file):
         logging.info("signal rescale to: ({},{})".format(x.numpy().min(), x.numpy().max()))
     assert c==input_image_channel
     assert h==input_image_size
+    
+    logging.info("[INFO] Preprocessing Configuration:")
+    logging.info("  - Crop Size: {}".format(crop_size if crop_size else "same as image size"))
+    logging.info("  - Crop Type: {}".format(crop_type))
+    logging.info("  - Crop Position: {}".format(crop_position))
+    logging.info("  - Data Augmentation: {}".format(augment))
     
     logging.info("[INFO] Forward Training Steps: {}".format(timesteps))
     logging.info("[INFO] Noise Scheduler: {} ".format(scheduler))
