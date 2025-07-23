@@ -1,13 +1,13 @@
 DATASET:
   NAME: simple01
-  PATH: ../datasets/simple01_eng_letters/data/
-  LABEL_KEY: label
+  PATH: ../datasets/simple01_eng_letters/data/   # Path to the dataset directory, contains npz files
+  LABEL_KEY: label          # optional, key for labels in npz files
   PREPROCESSING:
-    CROP_SIZE:
-    CROP_TYPE: random  # Options: center, random, corner, smart, multi_crop
-    CROP_POSITION:  # For corner cropping: top_left, top_right, bottom_left, bottom_right, center
-    AUGMENT: false  # Enable data augmentation (rotation, flip, brightness, contrast)
-    AUGMENT_TYPE:   # fliplr, flipud
+    CROP_SIZE:              # optional, if not set, will use the full image size
+    CROP_TYPE: 'center'     # Options: center, random, corner, smart, multi_crop
+    CROP_POSITION: 'center' # For corner cropping: top_left, top_right, bottom_left, bottom_right, center
+    AUGMENT: false          # Enable data augmentation (rotation, flip, etc.)
+    AUGMENT_TYPE:           # fliplr, flipud, rotate90
     CLIP_MIN: -1.0
     CLIP_MAX: 1.0
 
@@ -21,15 +21,16 @@ TRAINING:
   INLINE_GEN:
     ENABLE: true
     NUMS: 20
-    PERIOD: 10
+    PERIOD: 10  # Generate images every N epochs
     REVERSE_STRIDE: 10
   HYPER_PARAMETERS:
     EPOCHS: 100
-    LR_TYPE: constant
     STEPS_PER_EPOCH: 100
     BATCH_SIZE: 8
+    SAVE_PERIOD:      # Save model every N epochs
+    LR_TYPE: constant    # Options: constant, warmup_cosine
     LEARNING_RATE: 0.0001
-    WARMUP_STEPS:
+    WARMUP_STEPS:        # for warmup_cosine 
   NETWORK:
     BLOCK_SIZE: 1
     SCHEDULER: linear
@@ -37,16 +38,17 @@ TRAINING:
     NUM_RES_BLOCKS: 2
     NORM_GROUPS: 8
     TIME_EMB_DIM: 128
-    FIRST_CHANNEL: 32
-    CHANNEL_MULTIPLIER: [1, 2, 4]
-    HAS_ATTENTION: [False, False, True]
+    FIRST_CHANNEL: 16
+    CHANNEL_MULTIPLIER: [1, 2, 4, 8]
+    HAS_ATTENTION: [False, False, True, True]
     NUM_HEADS: 1
+    DROPOUT_RATE: 0.1
     NUM_CLASSES: 26
   OUTPUT_DIR: "./training_outputs"
 
 IMAGE_GENERATION:
   MODEL_PATH: 
-  GEN_TASK: "random_uncond"  # channel_inpaint, class_cond
+  GEN_TASK: "random"  # Options: random_uncond, channel_inpaint
   NUM_GEN_IMAGES: 20
   EXTERNAL_NPZ_INPUT:
   CLASS_LABEL:

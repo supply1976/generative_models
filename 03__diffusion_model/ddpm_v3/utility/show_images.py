@@ -72,8 +72,8 @@ def display_images(images, nrows, ncols):
 
 def main():
   parser = argparse.ArgumentParser()
-  parser.add_argument('ij', nargs=2)
-  parser.add_argument('--npz', type=str, default=None)
+  parser.add_argument('--ij', nargs=2, default=[1, 1], type=int)
+  parser.add_argument('npz', type=str)
   parser.add_argument('--feats_csv', type=str, default=None)
   FLAGS, _ = parser.parse_known_args()
   
@@ -91,7 +91,7 @@ def main():
     feats = np.around(df[['Hx','Hy']].values, 2)
     print(feats.shape)
 
-  i, j = list(map(int, FLAGS.ij))
+  i, j = FLAGS.ij
 
   #display_images(images_resized, 15, 20)
   display_images(images, i, j)
