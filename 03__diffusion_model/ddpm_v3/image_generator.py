@@ -126,7 +126,7 @@ class ImageGenerator:
     
     def generate_images_and_save(self,
                                  logs=None,
-                                 gen_task="random_uncond",
+                                 gen_task="random",
                                  reverse_stride=10,
                                  savedir='./',
                                  num_images=20,

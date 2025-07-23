@@ -231,8 +231,10 @@ class DataLoader:
         # Random vertical flip
         if np.random.rand() > 0.5:
           arr = np.flipud(arr)
-      elif self.augment_type == 'rotate':
-        arr = np.rot90(arr)  # Rotate 90 degrees clockwise
+      elif self.augment_type == 'rotate90':
+        if np.random.rand() > 0.5:
+          # Rotate 90 degrees clockwise
+          arr = np.rot90(arr)  # Rotate 90 degrees clockwise
       else:
         raise ValueError(f"Unknown augment_type: {self.augment_type}")
     

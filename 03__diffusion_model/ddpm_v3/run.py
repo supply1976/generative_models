@@ -549,12 +549,13 @@ class ImageGenerator:
         model_dir = os.path.dirname(self.imgen_config.model_path)
         gen_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         
+        gen_steps = str(self.network_config.timesteps // self.imgen_config.reverse_stride) + "steps"
+        gen_save_dir1 = "_".join(["imgen", self.imgen_config.gen_task])
+        gen_save_dir2 = "_".join([gen_steps, os.uname().nodename, gen_date])
+        
         if self.imgen_config.gen_save_dir is None:
-            gen_steps = str(self.network_config.timesteps // self.imgen_config.reverse_stride) + "steps"
-            gen_save_dir = "_".join([
-                "imgen", gen_steps, self.imgen_config.gen_task, os.uname().nodename, gen_date
-            ])
-            self.imgen_config.gen_save_dir = os.path.join(model_dir, gen_save_dir)
+            self.imgen_config.gen_save_dir = model_dir
+        self.imgen_config.gen_save_dir = os.path.join(self.imgen_config.gen_save_dir, gen_save_dir1, gen_save_dir2)
         
         os.makedirs(self.imgen_config.gen_save_dir, exist_ok=True)
         
@@ -648,14 +649,11 @@ class ImageGenerator:
     def _prepare_generation_inputs(self) -> Tuple[Optional[np.ndarray], Optional[tf.Tensor]]:
         """Prepare base images and labels for generation."""
         # Validate generation task
-        if self.imgen_config.gen_task == "random_uncond":
+        if self.imgen_config.gen_task == "random":
             pass  # No additional validation needed
         elif self.imgen_config.gen_task == 'channel_inpaint':
             assert self.imgen_config.external_npz_input is not None
             assert self.imgen_config.freeze_channel is not None
-        elif self.imgen_config.gen_task == 'class_cond':
-            assert self.imgen_config.class_label is not None
-            assert self.network_config.num_classes is not None
         else:
             raise NotImplementedError(f"Generation task {self.imgen_config.gen_task} not implemented")
         
@@ -673,12 +671,10 @@ class ImageGenerator:
         if isinstance(self.imgen_config.class_label, int):
             labels = tf.fill([self.imgen_config.num_gen_images], int(self.imgen_config.class_label))
         elif isinstance(self.imgen_config.class_label, list):
-            label_choices = np.random.choice(
-                self.imgen_config.class_label * self.imgen_config.num_gen_images, 
-                self.imgen_config.num_gen_images
-            )
-            labels = tf.constant(label_choices, tf.int32)
-        
+            labels = self.imgen_config.class_label * self.imgen_config.num_gen_images
+            labels = labels[:self.imgen_config.num_gen_images]
+            labels = tf.constant(labels, tf.int32)
+            
         return base_images, labels
 
 
