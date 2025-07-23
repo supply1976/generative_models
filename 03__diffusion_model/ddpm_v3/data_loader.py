@@ -232,8 +232,7 @@ class DataLoader:
         if np.random.rand() > 0.5:
           arr = np.flipud(arr)
       elif self.augment_type == 'rotate':
-        # Random rotation (not implemented here, could use tf.image)
-        pass
+        arr = np.rot90(arr)  # Rotate 90 degrees clockwise
       else:
         raise ValueError(f"Unknown augment_type: {self.augment_type}")
     
@@ -429,7 +428,7 @@ def unit_test():
         crop_position=config.get("crop_position"),
         image_key="images",
         label_key="labels",
-        augment=True if config.get("crop_type") == "random" else False
+        augment=True if config.get("crop_type") == "random" else False,
         augment_type=config.get("augment_type", None),
       )
       

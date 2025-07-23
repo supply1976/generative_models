@@ -8,7 +8,7 @@ from image_generator import ImageGenerator, MemoryLogger
 
 
 class DiffusionModel(keras.Model):
-    def __init__(self, network, ema_network, diff_util, num_classes, ema=0.999):
+    def __init__(self, network, ema_network, diff_util, num_classes, save_period=100, ema=0.999):
         super().__init__()
         self.network = network
         self.ema_network = ema_network
@@ -17,6 +17,7 @@ class DiffusionModel(keras.Model):
         self.ema = ema
         self.clip_denoise = diff_util.clip_denoise
         self.num_classes = num_classes
+        self.save_period = save_period
         self.loss_tracker = keras.metrics.Mean(name='loss')
         self.noise_loss_tracker = keras.metrics.Mean(name="n_loss")
         self.image_loss_tracker = keras.metrics.Mean(name="i_loss")
@@ -124,9 +125,10 @@ class DiffusionModel(keras.Model):
         os.makedirs(savedir, exist_ok=True)
         epo = str(epoch+1).zfill(5)
         output_name = "unet_tf" + tf.__version__ + "ema_"
-        if (epoch+1) % 200 == 0 and epoch > 0:
-            path_unet_ema_epo = os.path.join(savedir, output_name+f"epoch_{epo}")
-            self.ema_network.save(path_unet_ema_epo + ".h5", include_optimizer=False)
+        if self.save_period is not None:
+            if (epoch+1) % self.save_period == 0 and epoch > 0:
+                path_unet_ema_epo = os.path.join(savedir, output_name+f"epoch_{epo}")
+                self.ema_network.save(path_unet_ema_epo + ".h5", include_optimizer=False)
             
         path_unet_ema_latest = os.path.join(savedir, output_name+"latest")
         self.ema_network.save(path_unet_ema_latest + ".h5", include_optimizer=False)
