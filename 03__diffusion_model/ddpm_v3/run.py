@@ -554,8 +554,9 @@ class ImageGenerator:
         gen_save_dir2 = "_".join([gen_steps, os.uname().nodename, gen_date])
         
         if self.imgen_config.gen_save_dir is None:
-            self.imgen_config.gen_save_dir = model_dir
-        self.imgen_config.gen_save_dir = os.path.join(self.imgen_config.gen_save_dir, gen_save_dir1, gen_save_dir2)
+            self.imgen_config.gen_save_dir = os.path.join(model_dir, gen_save_dir1, gen_save_dir2)
+        else:
+            self.imgen_config.gen_save_dir = os.path.join(self.imgen_config.gen_save_dir, gen_save_dir1)
         
         os.makedirs(self.imgen_config.gen_save_dir, exist_ok=True)
         
