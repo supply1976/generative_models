@@ -135,6 +135,8 @@ class ImageGenerator:
                                  labels=None,
                                  inpaint_mask=None,
                                  freeze_channel=None,
+                                 freeze_space_coord1=None,
+                                 freeze_space_coord2=None,
                                  export_intermediate=False,
                                  enable_memory_logging=False,
                                  memory_log_path=None,
@@ -181,6 +183,16 @@ class ImageGenerator:
             #base_images = tf.convert_to_tensor(base_images)
             # update the samples for the input of inpaint generation
             samples = samples * inpaint_mask + base_images * (1 - inpaint_mask)
+
+        if gen_task == 'space_inpaint':
+            inpaint_mask = np.ones_like(base_images)
+            assert freeze_space_coord1 is not None
+            assert freeze_space_coord2 is not None
+            x0,y0 = freeze_space_coord1
+            x1,y1 = freeze_space_coord2
+            inpaint_mask[:, x0:x1, y0:y1, :] = 0
+            inpaint_mask = tf.convert_to_tensor(inpaint_mask)
+            samples = samples * inpaint_mask + base_images * (1 - inpaint_mask)
         # Prepare output dictionary
         output_dict = {}
         if export_intermediate:
@@ -200,6 +212,7 @@ class ImageGenerator:
         )
         use_predict = True if num_images>100 else False 
         for t in tqdm.tqdm(reverse_timeindex):
+            # _denoise_step() is faster than _denoise_step_with_predict()
             if use_predict:
                 samples = self._denoise_step_use_predict(
                     samples, tf.constant(t, dtype=tf.int32), clip_denoise, labels)

@@ -77,7 +77,7 @@ class NetworkConfig:
 
 @dataclass
 class TrainingConfig:
-    """Training configuration."""
+    """Training configuration, including inline generation"""
     input_image_size: int
     input_image_channel: int
     output_dir: str
@@ -96,24 +96,27 @@ class TrainingConfig:
     inline_gen_nums: int = 20
     inline_gen_period: int = 10
     inline_gen_reverse_stride: int = 10
+    inline_gen_image_size: Optional[int] = None
 
 
 @dataclass
 class ImageGenConfig:
-    """Image generation configuration."""
+    """(Post) Image generation configuration."""
     model_path: str
     gen_task: str = 'random_uncond'
     num_gen_images: int = 20
     external_npz_input: Optional[str] = None
     class_label: Optional[Union[int, list]] = None
     freeze_channel: Optional[int] = None
+    freeze_space_coord1: Optional[list] = None
+    freeze_space_coord2: Optional[list] = None
     reverse_stride: int = 10
     ddim_eta: float = 1.0
     export_interm: bool = False
     gen_save_dir: Optional[str] = None
     random_seed: Optional[int] = None
     clip_denoise: bool = False
-    new_image_size: Optional[int] = None
+    target_image_size: Optional[int] = None
 
 
 # =====================
@@ -166,7 +169,8 @@ class ConfigManager:
             inline_gen_enable=inline_gen.get('ENABLE', True),
             inline_gen_nums=inline_gen.get('NUMS', 20),
             inline_gen_period=inline_gen.get('PERIOD', 10),
-            inline_gen_reverse_stride=inline_gen.get('REVERSE_STRIDE', 10)
+            inline_gen_reverse_stride=inline_gen.get('REVERSE_STRIDE', 10),
+            inline_gen_image_size=inline_gen.get('IMAGE_SIZE'),
         )
         
         # Parse network config
@@ -198,13 +202,15 @@ class ConfigManager:
             external_npz_input=imgen_dict.get('EXTERNAL_NPZ_INPUT'),
             class_label=imgen_dict.get('CLASS_LABEL'),
             freeze_channel=imgen_dict.get('FREEZE_CHANNEL'),
+            freeze_space_coord1=imgen_dict.get('FREEZE_SPACE_COORD1'),
+            freeze_space_coord2=imgen_dict.get('FREEZE_SPACE_COORD2'),
             reverse_stride=imgen_dict.get('REVERSE_STRIDE', 10),
             ddim_eta=imgen_dict.get('DDIM_ETA', 1.0),
             export_interm=imgen_dict.get('EXPORT_INTERM', False),
             gen_save_dir=imgen_dict.get('GEN_SAVE_DIR'),
             random_seed=imgen_dict.get('RANDOM_SEED'),
             clip_denoise=imgen_dict.get('CLIP_DENOISE', False),
-            new_image_size=imgen_dict.get('NEW_IMAGE_SIZE'),
+            target_image_size=imgen_dict.get('TARGET_IMAGE_SIZE'),
         )
         
         return dataset_config, training_config, network_config, imgen_config
@@ -315,13 +321,20 @@ class DirectoryManager:
         model_nametag += f"g{network_config.norm_groups}rb{network_config.num_res_blocks}bk{network_config.block_size}"
         
         # Determine image size
+        orig_image_size = training_config.input_image_size
         input_image_size = dataset_config.crop_size or training_config.input_image_size
         input_shape = (input_image_size, input_image_size, training_config.input_image_channel)
         
         # Create dataset and model directories
+        dataset_tag = f"{dataset_config.name}_{input_shape[-1]}x{orig_image_size}"
+        if dataset_config.crop_size is not None:
+            dataset_tag += f"_{dataset_config.crop_type}_crop_{dataset_config.crop_size}"
+        if dataset_config.augment:
+            dataset_tag += f"_aug_{dataset_config.augment_type}"
+
         dataset_tag = os.path.join(
-            os.path.abspath(training_config.output_dir),
-            f"{dataset_config.name}_{input_shape[0]}x{input_shape[1]}x{input_shape[2]}"
+            os.path.abspath(training_config.output_dir), 
+            dataset_tag
         )
         os.makedirs(dataset_tag, exist_ok=True)
         
@@ -380,9 +393,10 @@ class DatasetManager:
         
         # Batch and prefetch
         train_ds = train_ds.batch(training_config.batch_size, drop_remainder=True)
-        valid_ds = valid_ds.batch(training_config.batch_size)
         train_ds = train_ds.prefetch(autotune)
-        valid_ds = valid_ds.prefetch(autotune)
+        if valid_ds is not None:
+            valid_ds = valid_ds.batch(training_config.batch_size)
+            valid_ds = valid_ds.prefetch(autotune)
         
         return train_ds, valid_ds
 
@@ -521,6 +535,7 @@ class DiffusionTrainer:
         ddpm.compile(loss=loss_fn, optimizer=optimizer)
         ddpm.fit(
             train_ds,
+            validation_data=valid_ds,
             epochs=self.training_config.epochs,
             steps_per_epoch=self.training_config.steps_per_epoch,
             callbacks=callbacks,
@@ -549,9 +564,9 @@ class ImageGenerator:
         model_dir = os.path.dirname(self.imgen_config.model_path)
         gen_date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         
-        gen_steps = str(self.network_config.timesteps // self.imgen_config.reverse_stride) + "steps"
+        gen_steps = str(self.network_config.timesteps // self.imgen_config.reverse_stride)
         gen_save_dir1 = "_".join(["imgen", self.imgen_config.gen_task])
-        gen_save_dir2 = "_".join([gen_steps, os.uname().nodename, gen_date])
+        gen_save_dir2 = "_".join([gen_steps+"steps", os.uname().nodename, gen_date])
         
         if self.imgen_config.gen_save_dir is None:
             self.imgen_config.gen_save_dir = os.path.join(model_dir, gen_save_dir1, gen_save_dir2)
@@ -572,18 +587,22 @@ class ImageGenerator:
             clip_denoise=self.imgen_config.clip_denoise
         )
         
-        if self.imgen_config.new_image_size is not None:
-            input_image_size = self.imgen_config.new_image_size
+        if self.imgen_config.target_image_size is not None:
+            target_image_size = self.imgen_config.target_image_size
         else:
-            input_image_size = self.dataset_config.crop_size or self.training_config.input_image_size
+            target_image_size = self.dataset_config.crop_size or self.training_config.input_image_size
         
         # Build models
         _, ema_model = ModelBuilder.build_models(
-            input_image_size, self.training_config.input_image_channel, self.network_config
+            target_image_size, 
+            self.training_config.input_image_channel, 
+            self.network_config,
         )
         # Show inputs, outputs and total parameters only, no display of model graph details
         ema_model_encoded = keras.Model(
-            inputs=ema_model.inputs, outputs=ema_model(ema_model.inputs, training=False), name="DDPM_Network"
+            inputs=ema_model.inputs, 
+            outputs=ema_model(ema_model.inputs, training=False), 
+            name="DDPM_Network"
         )
         ema_model_encoded.summary()
 
@@ -622,6 +641,8 @@ class ImageGenerator:
             labels=labels,
             inpaint_mask=None,
             freeze_channel=self.imgen_config.freeze_channel,
+            freeze_space_coord1=self.imgen_config.freeze_space_coord1,
+            freeze_space_coord2=self.imgen_config.freeze_space_coord2,
             export_intermediate=self.imgen_config.export_interm,
             enable_memory_logging=True,
             memory_log_path=os.path.join(self.imgen_config.gen_save_dir, "memory_log.txt"),
@@ -651,10 +672,13 @@ class ImageGenerator:
         """Prepare base images and labels for generation."""
         # Validate generation task
         if self.imgen_config.gen_task == "random":
-            pass  # No additional validation needed
+            # ignore the setting of external_npz_input
+            self.imgen_config.external_npz_input = None
         elif self.imgen_config.gen_task == 'channel_inpaint':
             assert self.imgen_config.external_npz_input is not None
             assert self.imgen_config.freeze_channel is not None
+        elif self.imgen_config.gen_task == 'space_inpaint':
+            assert self.imgen_config.external_npz_input is not None
         else:
             raise NotImplementedError(f"Generation task {self.imgen_config.gen_task} not implemented")
         
