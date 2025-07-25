@@ -1,13 +1,15 @@
 DATASET:
   NAME: simple01
-  PATH: ../datasets/simple01_eng_letters/data/   # Path to the dataset directory, contains npz files
+  PATH: ../datasets/simple01_eng_letters/data/   # Path to the dataset directory, 
+                                                 # contains npz files with 'image' key
   LABEL_KEY: label          # optional, key for labels in npz files
   PREPROCESSING:
     CROP_SIZE:              # optional, if not set, will use the full image size
     CROP_TYPE: 'center'     # Options: center, random, corner, smart, multi_crop
-    CROP_POSITION: 'center' # For corner cropping: top_left, top_right, bottom_left, bottom_right, center
+    CROP_POSITION: 'center' # For corner cropping: 
+                            # top_left, top_right, bottom_left, bottom_right, center
     AUGMENT: false          # Enable data augmentation (rotation, flip, etc.)
-    AUGMENT_TYPE:           # fliplr, flipud, rotate90
+    AUGMENT_TYPE:           # fliplr, flipud, rotate90, center_defect
     CLIP_MIN: -1.0
     CLIP_MAX: 1.0
 
@@ -24,10 +26,10 @@ TRAINING:
     PERIOD: 10  # Generate images every N epochs
     REVERSE_STRIDE: 10
   HYPER_PARAMETERS:
-    EPOCHS: 100
+    EPOCHS: 200
     STEPS_PER_EPOCH: 100
     BATCH_SIZE: 8
-    SAVE_PERIOD:      # Save model every N epochs
+    SAVE_PERIOD: 20      # Save model every N epochs
     LR_TYPE: constant    # Options: constant, warmup_cosine
     LEARNING_RATE: 0.0001
     WARMUP_STEPS:        # for warmup_cosine 
@@ -56,5 +58,6 @@ IMAGE_GENERATION:
   REVERSE_STRIDE: 10
   DDIM_ETA: 1.0
   EXPORT_INTERM: false
-  GEN_SAVE_DIR:
+  GEN_SAVE_DIR: gen_temp
   RANDOM_SEED:
+  TARGET_IMAGE_SIZE:
