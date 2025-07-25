@@ -453,6 +453,25 @@ class DiffusionTrainer:
         self.dataset_config, self.training_config, self.network_config, self.imgen_config = \
             ConfigManager.parse_config(config_file)
     
+    def plot_model_graph(self):
+        # Determine image size
+        input_image_size = self.dataset_config.crop_size or self.training_config.input_image_size
+
+        # Build models
+        network, _ = ModelBuilder.build_models(
+            input_image_size, self.training_config.input_image_channel, self.network_config
+        )
+        network.summary()
+        tf.keras.utils.plot_model(
+            network,
+            to_file="unet_model_diagram.png",
+            show_shapes=True,
+            show_layer_names=True,
+            expand_nested=True,
+            dpi=120,
+        )
+        print("Model diagram saved as unet_model_diagram.png")
+
     def train(self):
         """Execute the training workflow."""
         # Setup GPU
@@ -713,6 +732,7 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     parser.add_argument("--training", action='store_true', help="Run training mode")
     parser.add_argument("--imgen", action='store_true', help="Run image generation mode")
+    parser.add_argument("--plot_model_graph", action='store_true', help="show model graph")
     parser.add_argument("--enable_xla", action='store_true', help='Enable XLA JIT compilation')
     
     args = parser.parse_args()
@@ -728,6 +748,10 @@ def main():
     elif args.imgen:
         generator = ImageGenerator(args.config)
         generator.generate()
+    elif args.plot_model_graph:
+        trainer = DiffusionTrainer(args.config)
+        trainer.plot_model_graph()
+
     else:
         print("No action specified. Use --training or --imgen.")
 
