@@ -220,6 +220,7 @@ class DataLoader:
     Returns:
         np.ndarray: Augmented image array
     """
+    h, w, _ = arr.shape
     if not self.augment:
       return arr
     else:
@@ -235,6 +236,14 @@ class DataLoader:
         if np.random.rand() > 0.5:
           # Rotate 90 degrees clockwise
           arr = np.rot90(arr)  # Rotate 90 degrees clockwise
+      elif self.augment_type == 'center_defect':
+        # TODO: experiment only
+        if np.random.rand() > 0.5:
+          # Add random defect at center (null the image at center by small area)
+          _mask = np.ones_like(arr)
+          _mask[h//2-5:h//2+5, w//2-5:w//2+5, :] = 0
+          arr = arr * _mask
+
       else:
         raise ValueError(f"Unknown augment_type: {self.augment_type}")
     
@@ -395,7 +404,7 @@ def unit_test():
     if i % 2 == 0:
       img = np.random.rand(128, 128, 3).astype(np.float32)  # RGB
     else:
-      img = np.random.rand(96, 96, 1).astype(np.float32)   # Grayscale
+      img = np.random.rand(96, 96, 3).astype(np.float32)    # RGB
     
     label = i % 3  # 3 classes
     
@@ -413,7 +422,7 @@ def unit_test():
     {"crop_type": "center", "crop_size": 64},
     {"crop_type": "random", "crop_size": 64},
     {"crop_type": "corner", "crop_size": 64, "crop_position": "top_left"},
-    {"crop_type": "smart", "crop_size": 64},
+    {"crop_type": "smart",  "crop_size": 64},
     {"crop_type": "center", "crop_size": None},  # No cropping
   ]
   
