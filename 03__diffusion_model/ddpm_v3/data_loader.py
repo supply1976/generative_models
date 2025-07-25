@@ -18,6 +18,7 @@ class DataLoader:
     file_format='.npz',
     augment=False,
     augment_type=None,
+    validation_split=None,
     ):
     """
     Enhanced DataLoader for DDPM v3 with flexible cropping options.
@@ -59,6 +60,7 @@ class DataLoader:
     self.data_dir = os.path.abspath(data_dir)
     self.image_key = image_key
     self.label_key = label_key
+    self.validation_split = validation_split
     
     # Validate crop parameters
     valid_crop_types = ['center', 'random', 'corner', 'multi_crop', 'smart']
@@ -75,26 +77,40 @@ class DataLoader:
     assert self.image_key is not None, "image_key should not be None"
     assert file_format is not None, "file_format should not be None"
 
-    self.train_npzfiles = []
-    self.valid_npzfiles = []
+    self.all_npzfiles = []
     # search the npz files in the data_dir
     for root, dirs, files in os.walk(self.data_dir):
       for fn in files:
         if fn.endswith(file_format):
           file_path = os.path.join(root, fn)
-          if np.random.rand() < 0.8:  # 80% for training, 20% for validation
-            self.train_npzfiles.append(file_path)
-          else:
-            self.valid_npzfiles.append(file_path)
-    assert len(self.train_npzfiles) > 0
-    assert len(self.valid_npzfiles) > 0
+          self.all_npzfiles.append(file_path)
+    
+    assert len(self.all_npzfiles) > 0
+    if len(self.all_npzfiles)==1:
+      # if only have one data, ignore the setting of validaiton_split
+      self.validation_split = None
+    
+    self.all_npzfiles = np.array(self.all_npzfiles)
+
+    if self.validation_split is not None:
+      nums_valid = int(len(self.all_npzfiles)*self.validation_split)
+      nums_valid = 1 if nums_valid==0 else nums_valid
+      nums_train = len(self.all_npzfiles) - nums_valid
+      nums_train = 1 if nums_train==0 else nums_train
+      idx = np.arange(len(self.all_files))
+      np.random.shuffle(idx)
+      self.train_npzfiles = self.all_npzfiles[idx[0:nums_train]]
+      self.valid_npzfiles = self.all_npzfiles[idx[nums_train:]]
+    else:
+      self.train_npzfiles = self.all_npzfiles
+      self.valid_npzfiles = []
     print(f"Found {len(self.train_npzfiles)} training files")
     print(f"Found {len(self.valid_npzfiles)} validation files.")
-    self.all_npzfiles = self.train_npzfiles + self.valid_npzfiles
-    self.train_ds = tf.data.Dataset.from_tensor_slices(self.all_npzfiles)
-    self.valid_ds = tf.data.Dataset.from_tensor_slices(self.valid_npzfiles)
-    #print(self.train_ds)
-    #print(self.valid_ds)
+    self.train_ds = tf.data.Dataset.from_tensor_slices(self.train_npzfiles)
+    if len(self.valid_npzfiles) > 0:
+      self.valid_ds = tf.data.Dataset.from_tensor_slices(self.valid_npzfiles)
+    else:
+      self.valid_ds = None
 
   def _apply_crop(self, arr, is_training=True):
     """
@@ -331,13 +347,16 @@ class DataLoader:
       .repeat()
     )
     
-    # Validation dataset with deterministic preprocessing
-    valid_ds = (
-      self.valid_ds
-      .map(lambda x: self._load_npz(x, is_training=False), 
-           num_parallel_calls=tf.data.AUTOTUNE)
-      .cache()
-    )
+    if self.valid_ds is not None:
+      # Validation dataset with deterministic preprocessing
+      valid_ds = (
+        self.valid_ds
+        .map(lambda x: self._load_npz(x, is_training=False), 
+             num_parallel_calls=tf.data.AUTOTUNE)
+        .cache()
+      )
+    else:
+      valid_ds = None
     
     return (train_ds, valid_ds)
 
@@ -351,6 +370,9 @@ class DataLoader:
     Returns:
         tf.data.Dataset: Dataset with multiple crops per image
     """
+    if self.valid_ds is None:
+      return 
+
     def multi_crop_fn(path):
       crops = []
       for _ in range(num_crops):
@@ -372,6 +394,7 @@ class DataLoader:
         dict: Dataset information
     """
     return {
+      'validation_split': self.validation_split,
       'num_train_files': len(self.train_npzfiles),
       'num_valid_files': len(self.valid_npzfiles),
       'total_files': len(self.all_npzfiles),
